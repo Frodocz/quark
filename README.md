@@ -7,7 +7,7 @@
   <h1>
     Quark
   </h1>
-  <p><b>Ultra-low-latency asynchronous C++20 utility library for performance-critical applications</b></p>
+  <p><b>Ultra-low-latency C++20 utility library for performance-critical applications</b></p>
 
   <div>
     <a href="https://opensource.org/licenses/MIT">
