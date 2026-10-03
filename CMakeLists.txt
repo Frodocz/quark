@@ -101,7 +101,35 @@ FetchContent_Declare(
     GIT_TAG        v13.0.0
 )
 
-FetchContent_MakeAvailable(quill)
+FetchContent_Declare(
+    tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG        v3.4.0
+)
+
+# whether to use std::format or use external fmtlib
+set(QUARK_USE_STD_FORMAT OFF)
+
+# 根据编译器及版本进行条件判断
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # GCC 13.1 and above fully support std::format
+    if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "13.0")
+        set(QUARK_USE_STD_FORMAT ON)
+    endif ()
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # Clang 16.0 and above support most of functionalities of libc++ <format>
+    if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "16.0")
+        set(QUARK_USE_STD_FORMAT ON)
+    endif ()
+endif ()
+
+if (QUARK_USE_STD_FORMAT)
+    message(STATUS "Configuring with C++20 std::format (Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+else()
+    message(STATUS "Configuring with quill bundled fmtlib (Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+endif ()
+
+FetchContent_MakeAvailable(quill tomlplusplus)
 
 #-------------------------------------------------------------------------------------------------------
 # Log Info
@@ -122,6 +150,7 @@ message(STATUS "QUARK_ENABLE_ASSERTIONS: " ${QUARK_ENABLE_ASSERTIONS})
 message(STATUS "QUARK_ENABLE_INSTALL: " ${QUARK_ENABLE_INSTALL})
 message(STATUS "QUARK_ENABLE_LOGGER: " ${QUARK_ENABLE_LOGGER})
 message(STATUS "QUARK_NO_EXCEPTIONS: " ${QUARK_NO_EXCEPTIONS})
+message(STATUS "QUARK_USE_STD_FORMAT: " ${QUARK_USE_STD_FORMAT})
 
 #-------------------------------------------------------------------------------------------------------
 # Verbose make file option
@@ -161,11 +190,15 @@ set(TARGET_NAME quark)
 # header files
 set(HEADER_FILES
         include/quark/Attributes.h
-        include/quark/Logger.h
+        include/quark/Config.h
+        include/quark/QuarkError.h
+        include/quark/QuarkFormat.h
+        # include/quark/Logger.h
 )
 
 set(SOURCE_FILES
-        src/Logger.cpp
+        src/Config.cpp
+        # src/Logger.cpp
 )
 
 # Add as a library
@@ -173,7 +206,13 @@ add_library(${TARGET_NAME} ${SOURCE_FILES} ${HEADER_FILES})
 add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
 # Link dependencies
-target_link_libraries(${TARGET_NAME} INTERFACE Threads::Threads quill::quill)
+target_link_libraries(${TARGET_NAME}
+        PRIVATE
+            quill::quill
+            $<BUILD_LOCAL_INTERFACE:tomlplusplus::tomlplusplus>
+        PUBLIC
+            Threads::Threads        
+)
 
 target_compile_features(${TARGET_NAME} PUBLIC cxx_std_20)
 
@@ -190,13 +229,16 @@ target_include_directories(${TARGET_NAME}
 
 if (QUARK_NO_EXCEPTIONS)
     target_compile_definitions(${TARGET_NAME} PRIVATE QUARK_NO_EXCEPTIONS)
-    # 库与使用者需对异常支持保持一致,因此 PUBLIC
     target_compile_options(${TARGET_NAME} PRIVATE
             $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-fno-exceptions>)
 endif ()
 
 if (QUARK_ENABLE_ASSERTIONS)
     target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_ENABLE_ASSERTIONS)
+endif ()
+
+if (QUARK_USE_STD_FORMAT)
+    target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_USE_STD_FORMAT)
 endif ()
 
 #-------------------------------------------------------------------------------------------------------
@@ -213,8 +255,6 @@ endif ()
 if (QUARK_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     add_subdirectory(tests)
 endif ()
-
-
 
 #-------------------------------------------------------------------------------------------------------
 # Install
@@ -273,8 +313,10 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     # Install the headers
     install(DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/include/quark DESTINATION ${QUARK_INC_DIR})
 
+    # Get the real target name and insert into export set
+    set(DEPENDENCY_TARGETS quill)
     # Install the library
-    install(TARGETS ${TARGET_NAME} quill EXPORT ${targets_export_name}
+    install(TARGETS ${TARGET_NAME} ${DEPENDENCY_TARGETS} EXPORT ${targets_export_name}
             LIBRARY DESTINATION ${QUARK_LIB_DIR}
             ARCHIVE DESTINATION ${QUARK_LIB_DIR}
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

@@ -14,7 +14,7 @@
         {                                                                \
             if (!(expression)) [[unlikely]]                              \
             {                                                            \
-                std::fprintf(stderr, "Lepton fatal error: %s (%s:%d)\n", \
+                std::fprintf(stderr, "Quark fatal error: %s (%s:%d)\n", \
                     error, __FILE__, __LINE__);                          \
                 std::abort();                                            \
             }                                                            \
