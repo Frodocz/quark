@@ -153,7 +153,7 @@ std::string join_path(std::string_view section, std::string_view field) {
 // Keys of a [log.<name>] table, and of the [log] table.
 constexpr std::string_view kLoggerKeys[] = {"to_console", "to_rotating_file", "level", "pattern", "filename",
                                             "max_file_size_bytes", "max_backup_files", "daily_rotation_time"};
-constexpr std::string_view kGlobalKeys[] = {"queue_type", "cpu_affinity"};
+constexpr std::string_view kGlobalKeys[] = {"queue_type", "cpu_affinity", "backend_sleep_ns", "backend_yield_when_idle"};
 
 template <std::size_t N>
 std::string_view find_present_key(const QuarkConfig& cfg, std::string_view section,
@@ -190,7 +190,12 @@ LogConfig LogConfig::load_from_config(const QuarkConfig& cfg, std::string_view s
     if (auto queue_type = cfg.get<std::string>(join_path(section, "queue_type"))) {
         config.global.queue_type = parse_queue_type(*queue_type);
     }
+    if (auto sleep_ns = cfg.get<int64_t>(join_path(section, "backend_sleep_ns"))) {
+        config.global.backend_sleep_duration = std::chrono::nanoseconds{std::max<int64_t>(*sleep_ns, 0)};
+    }
+    assign(cfg, join_path(section, "backend_yield_when_idle"), config.global.backend_yield_when_idle);
     if (auto cpus = cfg.get<QuarkConfigArray>(join_path(section, "cpu_affinity"))) {
+        config.global.cpu_affinity.clear();
         for (const auto& cpu : *cpus) {
             if (auto id = cpu.get<int64_t>()) {
                 config.global.cpu_affinity.push_back(*id);
@@ -280,6 +285,8 @@ bool init_log(const LogConfig& config) {
     quill::BackendOptions backend_options;
     backend_options.thread_name = kBackendThreadName;
     backend_options.cpu_affinity = to_cpu_affinity(config.global.cpu_affinity);
+    backend_options.sleep_duration = config.global.backend_sleep_duration;
+    backend_options.enable_yield_when_idle = config.global.backend_yield_when_idle;
     quill::Backend::start(backend_options);
     ctx.queue_type = config.global.queue_type;
 
@@ -299,13 +306,29 @@ bool init_log(const LogConfig& config) {
     // Publishes queue_type, root and loggers to lock-free readers.
     ctx.state.store(State::Running, std::memory_order_release);
 
-    QUARK_LOG_INFO("quark logging initialized: queue_type={} initial_queue_capacity={} loggers=[{}]",
-                   to_string(ctx.queue_type), kLogInitialQueueCapacity, names);
+    std::string cpus;
+    for (int64_t cpu : config.global.cpu_affinity) {
+        cpus += (cpus.empty() ? "" : ", ") + std::to_string(cpu);
+    }
+    QUARK_LOG_INFO("quark logging initialized: queue_type={} initial_queue_capacity={} huge_pages={} "
+                   "backend_sleep_ns={} cpu_affinity=[{}] loggers=[{}]",
+                   to_string(ctx.queue_type), kLogInitialQueueCapacity, kLogHugePages,
+                   config.global.backend_sleep_duration.count(), cpus, names);
     return true;
 }
 
 bool init_log(const QuarkConfig& cfg, std::string_view section) {
     return init_log(LogConfig::load_from_config(cfg, section));
+}
+
+void preallocate_log() noexcept {
+    auto& ctx = context();
+    if (ctx.state.load(std::memory_order_acquire) != State::Running) {
+        return;
+    }
+    detail::visit_queue_type(ctx.queue_type, [](auto type) {
+        quill::FrontendImpl<detail::FrontendOptions<decltype(type)::value>>::preallocate();
+    });
 }
 
 void shutdown_log() noexcept {
@@ -326,7 +349,7 @@ Logger get_logger(std::string_view name) noexcept {
     if (auto it = ctx.loggers.find(name); it != ctx.loggers.end()) {
         return it->second;
     }
-    QUARK_LOG_WARN("get_logger({}): no such logger, declare it in a [log.{}] table", name, name);
+    QUARK_LOG_WARN("get_logger({}): no such logger, declare it in the logging config", name);
     return {};
 }
 

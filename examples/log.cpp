@@ -6,8 +6,10 @@
 #include "quark/QuarkConfig.h"
 #include "quark/QuarkLog.h"
 
+// usage: quark_example_log [config.toml] [log_hft | log_service]
 int main(int argc, char** argv) {
     const char* config_path = argc > 1 ? argv[1] : QUARK_EXAMPLE_LOG_CONFIG;
+    const char* profile = argc > 2 ? argv[2] : "log_hft";
 
     // 1. Parse the application's config once. A parse error is reported by quark on stderr, since
     //    logging is not started yet.
@@ -17,9 +19,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 2. Start logging for the lifetime of main() from the config's [log] tables: every logger is
-    //    created here.
-    quark::ScopedLog scoped_log{*cfg};
+    // 2. Start logging for the lifetime of main() from the profile's tables, e.g. [log_hft] and
+    //    [log_hft.<name>]: every logger is created here. With a single [log] profile this is just
+    //    quark::ScopedLog{*cfg}.
+    quark::ScopedLog scoped_log{*cfg, profile};
+    std::cout << "logging with profile [" << profile << "], see logs/" << std::endl;
 
     // 3. Look the loggers up once and keep the handles, they are cheap to copy.
     quark::Logger app = quark::get_logger("app");
@@ -31,9 +35,10 @@ int main(int argc, char** argv) {
     // The same config object also carries the application's own settings.
     QLOG_INFO(app, "server listening on {}:{}", cfg->get_or("server.host", std::string{"0.0.0.0"}),
               cfg->get_or("server.port", int64_t{80}));
-    QLOG_DEBUG(app, "filtered out: [log.app] level = \"Info\"");
+    QLOG_DEBUG(app, "filtered out: app's level is Info in both profiles");
     QLOG_WARN(app, "values are formatted in the backend: {} {:.3f} {}", 42, 3.14159, std::string{"str"});
-    QLOG_DEBUG(monitor, "monitor logs everything: cpu={}%", 12.5);
+    QLOG_INFO(monitor, "cpu={}%", 12.5);
+    QLOG_DEBUG(monitor, "only with log_service, where monitor's level is Debug");
 
     // 4. Handles are safe to share across threads.
     std::vector<std::thread> workers;

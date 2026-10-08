@@ -36,6 +36,7 @@
 #include "quill/LogMacros.h"
 #include "quill/Logger.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -92,19 +93,37 @@ inline constexpr std::string_view kQuarkLoggerName{"quark"};
 // size of an unbounded one. Shared by all loggers used on that thread. quill only accepts it at
 // compile time, so it is a build option (-DQUARK_LOG_INITIAL_QUEUE_CAPACITY=...), not a config key.
 #ifndef QUARK_LOG_INITIAL_QUEUE_CAPACITY
-    #define QUARK_LOG_INITIAL_QUEUE_CAPACITY (64u * 1024u * 1024u)
+    #define QUARK_LOG_INITIAL_QUEUE_CAPACITY (2u * 1024u * 1024u)
 #endif
 inline constexpr std::size_t kLogInitialQueueCapacity{QUARK_LOG_INITIAL_QUEUE_CAPACITY};
 static_assert(kLogInitialQueueCapacity > 0, "QUARK_LOG_INITIAL_QUEUE_CAPACITY must be a positive number of bytes");
 
-// Process-wide settings, read from the top-level [log] table. quill fixes both for the whole
+// Back those queues with 2 MiB huge pages to cut TLB misses on the logging threads, falling back to
+// normal pages when the machine has none available (see vm.nr_hugepages). Build option
+// -DQUARK_LOG_HUGE_PAGES=ON|OFF.
+#ifndef QUARK_LOG_HUGE_PAGES
+    #define QUARK_LOG_HUGE_PAGES 1
+#endif
+inline constexpr bool kLogHugePages{QUARK_LOG_HUGE_PAGES != 0};
+
+// Process-wide settings, read from the top-level [log] table. quill fixes them for the whole
 // process, so they cannot be set per logger.
 struct QUARK_API LogGlobalOptions {
     // --- Queue type and memory allocation policies (frontend option) ---
     QueueType queue_type{QueueType::BoundedDropping};
 
     // --- Set CPU affinity for the backend thread (backend option) ---
-    std::vector<int64_t> cpu_affinity; // Empty means no pinning.
+    // Defaults to core 0; set it to the core reserved for logging. Empty means no pinning. If the core
+    // is not available the backend still runs, unpinned, and quill prints a warning.
+    std::vector<int64_t> cpu_affinity{0};
+
+    // --- Backend polling (backend option) ---
+    // How long the backend thread sleeps once every queue is empty, `backend_sleep_ns` in [log].
+    // Defaults to 0, busy-polling: lowest latency from log call to file, but the thread spins at 100%
+    // of its core, hence the pinning above.
+    std::chrono::nanoseconds backend_sleep_duration{0};
+    // Only with backend_sleep_duration == 0: yield the core when idle instead of spinning.
+    bool backend_yield_when_idle{false};
 };
 
 // Options of one logger, read from its [log.<name>] table. Missing keys keep these defaults.
@@ -172,6 +191,8 @@ template <QueueType Type>
 struct FrontendOptions : quill::FrontendOptions {
     static constexpr quill::QueueType queue_type = to_quill_queue_type(Type);
     static constexpr std::size_t initial_queue_capacity = kLogInitialQueueCapacity;
+    static constexpr quill::HugePagesPolicy huge_pages_policy =
+        kLogHugePages ? quill::HugePagesPolicy::Try : quill::HugePagesPolicy::Never;
 };
 
 template <QueueType Type>
@@ -248,6 +269,11 @@ QUARK_API bool init_log(const LogConfig& config = LogConfig{});
 
 // Same, reading the LogConfig from the [<section>] tables of the application's full config.
 QUARK_API bool init_log(const QuarkConfig& cfg, std::string_view section = "log");
+
+// Creates the calling thread's log queue now instead of on its first log statement, which would
+// otherwise pay for allocating and pre-faulting kLogInitialQueueCapacity bytes. Call it at the start
+// of every latency-sensitive thread, after init_log(). No-op if logging is not running.
+QUARK_API void preallocate_log() noexcept;
 
 // Flushes and stops the backend.
 // Final: get_logger() returns invalid loggers afterwards.

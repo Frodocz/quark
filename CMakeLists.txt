@@ -19,8 +19,8 @@ option(QUARK_DOCS_GEN "Generate documentation during the build process." OFF)
 option(QUARK_ENABLE_ASSERTIONS "Enable assertions in release builds. When disabled, assertions are only active in debug builds." OFF)
 option(QUARK_ENABLE_INSTALL "Enable the CMake install target when Quark is not the master project." OFF)
 option(QUARK_ENABLE_LOGGER "Enable logs for the framework" ON)
-set(QUARK_LOG_INITIAL_QUEUE_CAPACITY 67108864 CACHE STRING "Capacity in bytes of each logging thread's queue (quill only accepts it at compile time).")
 option(QUARK_ENABLE_TIME_TRACE "Enable -ftime-trace to generate compile-time profiling data. Requires Clang." OFF)
+option(QUARK_LOG_HUGE_PAGES "Back logging queues with 2 MiB huge pages, falling back to normal pages when none are available (Linux)." ON)
 option(QUARK_NO_EXCEPTIONS "Build without exception handling support." OFF)
 option(QUARK_SANITIZE_ADDRESS "Enable AddressSanitizer (ASan) for memory error detection in tests." OFF)
 option(QUARK_SANITIZE_THREAD "Enable ThreadSanitizer (TSan) for detecting thread-related issues in tests. Note: Using this option with non-Clang compilers may produce false positives." OFF)
@@ -28,6 +28,7 @@ option(QUARK_USE_VALGRIND "Use Valgrind as the default memory checking tool in C
 
 # Internal option
 set(QUARK_ENABLE_GCC_HARDENING OFF CACHE INTERNAL "")
+set(QUARK_LOG_INITIAL_QUEUE_CAPACITY 2097152 CACHE STRING "Capacity in bytes of each logging thread's queue, default 2MB (quill only accepts it at compile time).")
 
 #-------------------------------------------------------------------------------------------------------
 # Determine if quark is built as a subproject (using add_subdirectory) or if it is the master project.
@@ -149,6 +150,7 @@ message(STATUS "QUARK_BUILD_TESTS: " ${QUARK_BUILD_TESTS})
 message(STATUS "QUARK_ENABLE_ASSERTIONS: " ${QUARK_ENABLE_ASSERTIONS})
 message(STATUS "QUARK_ENABLE_INSTALL: " ${QUARK_ENABLE_INSTALL})
 message(STATUS "QUARK_ENABLE_LOGGER: " ${QUARK_ENABLE_LOGGER})
+message(STATUS "QUARK_LOG_HUGE_PAGES: " ${QUARK_LOG_HUGE_PAGES})
 message(STATUS "QUARK_LOG_INITIAL_QUEUE_CAPACITY: " ${QUARK_LOG_INITIAL_QUEUE_CAPACITY})
 message(STATUS "QUARK_NO_EXCEPTIONS: " ${QUARK_NO_EXCEPTIONS})
 message(STATUS "QUARK_USE_STD_FORMAT: " ${QUARK_USE_STD_FORMAT})
@@ -243,8 +245,10 @@ if (QUARK_USE_STD_FORMAT)
     target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_USE_STD_FORMAT)
 endif ()
 
-# PUBLIC: it is part of the logger types in QuarkLog.h, quark and its users must agree on it
-target_compile_definitions(${TARGET_NAME} PUBLIC QUARK_LOG_INITIAL_QUEUE_CAPACITY=${QUARK_LOG_INITIAL_QUEUE_CAPACITY})
+# PUBLIC: both are part of the logger types in QuarkLog.h, quark and its users must agree on them
+target_compile_definitions(${TARGET_NAME} PUBLIC
+        QUARK_LOG_INITIAL_QUEUE_CAPACITY=${QUARK_LOG_INITIAL_QUEUE_CAPACITY}
+        QUARK_LOG_HUGE_PAGES=$<BOOL:${QUARK_LOG_HUGE_PAGES}>)
 
 # Compiles quark's internal QUARK_LOG_* statements out entirely
 if (NOT QUARK_ENABLE_LOGGER)
