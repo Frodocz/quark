@@ -19,6 +19,7 @@ option(QUARK_DOCS_GEN "Generate documentation during the build process." OFF)
 option(QUARK_ENABLE_ASSERTIONS "Enable assertions in release builds. When disabled, assertions are only active in debug builds." OFF)
 option(QUARK_ENABLE_INSTALL "Enable the CMake install target when Quark is not the master project." OFF)
 option(QUARK_ENABLE_LOGGER "Enable logs for the framework" ON)
+set(QUARK_LOG_INITIAL_QUEUE_CAPACITY 67108864 CACHE STRING "Capacity in bytes of each logging thread's queue (quill only accepts it at compile time).")
 option(QUARK_ENABLE_TIME_TRACE "Enable -ftime-trace to generate compile-time profiling data. Requires Clang." OFF)
 option(QUARK_NO_EXCEPTIONS "Build without exception handling support." OFF)
 option(QUARK_SANITIZE_ADDRESS "Enable AddressSanitizer (ASan) for memory error detection in tests." OFF)
@@ -110,7 +111,6 @@ FetchContent_Declare(
 # whether to use std::format or use external fmtlib
 set(QUARK_USE_STD_FORMAT OFF)
 
-# 根据编译器及版本进行条件判断
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # GCC 13.1 and above fully support std::format
     if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "13.0")
@@ -149,6 +149,7 @@ message(STATUS "QUARK_BUILD_TESTS: " ${QUARK_BUILD_TESTS})
 message(STATUS "QUARK_ENABLE_ASSERTIONS: " ${QUARK_ENABLE_ASSERTIONS})
 message(STATUS "QUARK_ENABLE_INSTALL: " ${QUARK_ENABLE_INSTALL})
 message(STATUS "QUARK_ENABLE_LOGGER: " ${QUARK_ENABLE_LOGGER})
+message(STATUS "QUARK_LOG_INITIAL_QUEUE_CAPACITY: " ${QUARK_LOG_INITIAL_QUEUE_CAPACITY})
 message(STATUS "QUARK_NO_EXCEPTIONS: " ${QUARK_NO_EXCEPTIONS})
 message(STATUS "QUARK_USE_STD_FORMAT: " ${QUARK_USE_STD_FORMAT})
 
@@ -190,15 +191,15 @@ set(TARGET_NAME quark)
 # header files
 set(HEADER_FILES
         include/quark/Attributes.h
-        include/quark/Config.h
+        include/quark/QuarkConfig.h
         include/quark/QuarkError.h
         include/quark/QuarkFormat.h
-        # include/quark/Logger.h
+        include/quark/QuarkLog.h
 )
 
 set(SOURCE_FILES
-        src/Config.cpp
-        # src/Logger.cpp
+        src/QuarkConfig.cpp
+        src/QuarkLog.cpp
 )
 
 # Add as a library
@@ -206,12 +207,13 @@ add_library(${TARGET_NAME} ${SOURCE_FILES} ${HEADER_FILES})
 add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
 # Link dependencies
+# quill is PUBLIC: QuarkLog.h macros expand to quill code in the user's translation units
 target_link_libraries(${TARGET_NAME}
         PRIVATE
-            quill::quill
-            $<BUILD_LOCAL_INTERFACE:tomlplusplus::tomlplusplus>
+            $<BUILD_INTERFACE:tomlplusplus::tomlplusplus>
         PUBLIC
-            Threads::Threads        
+            quill::quill
+            Threads::Threads
 )
 
 target_compile_features(${TARGET_NAME} PUBLIC cxx_std_20)
@@ -239,6 +241,14 @@ endif ()
 
 if (QUARK_USE_STD_FORMAT)
     target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_USE_STD_FORMAT)
+endif ()
+
+# PUBLIC: it is part of the logger types in QuarkLog.h, quark and its users must agree on it
+target_compile_definitions(${TARGET_NAME} PUBLIC QUARK_LOG_INITIAL_QUEUE_CAPACITY=${QUARK_LOG_INITIAL_QUEUE_CAPACITY})
+
+# Compiles quark's internal QUARK_LOG_* statements out entirely
+if (NOT QUARK_ENABLE_LOGGER)
+    target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_DISABLE_INTERNAL_LOG)
 endif ()
 
 #-------------------------------------------------------------------------------------------------------

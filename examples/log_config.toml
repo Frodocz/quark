@@ -1,0 +1,34 @@
+# The application's own settings live next to the logging ones, in the same file.
+[server]
+host = "127.0.0.1"
+port = 8080
+
+# Global options, shared by every logger (quill fixes them for the whole process).
+# The queue capacity is a build option instead: -DQUARK_LOG_INITIAL_QUEUE_CAPACITY=<bytes>.
+[log]
+queue_type = "UnboundedBlocking"   # frontend: UnboundedBlocking | UnboundedDropping | BoundedBlocking | BoundedDropping
+cpu_affinity = []                  # backend thread, e.g. [3]
+
+# One table per logger, the table name is the logger name: quark::get_logger("app").
+# Keys: level, to_console, to_rotating_file, pattern, filename (default logs/<name>.log),
+#       max_file_size_bytes, max_backup_files, daily_rotation_time
+# Only the level can be changed at runtime, via Logger::set_level().
+
+# quark's own logger. Optional: quark uses the defaults if this table is absent.
+[log.quark]
+level = "Info"                     # Debug | Info | Warn | Error | Off
+
+[log.app]
+level = "Info"
+pattern = "%(time) [%(thread_id)] %(log_level:<9) %(logger:<8) %(message)"
+
+[log.net]
+level = "Warn"
+to_console = false
+filename = "logs/net.log"
+max_file_size_bytes = 67108864     # 64 MiB
+max_backup_files = 5
+
+[log.monitor]
+level = "Debug"
+to_rotating_file = false

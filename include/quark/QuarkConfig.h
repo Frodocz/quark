@@ -12,17 +12,17 @@
 
 QUARK_BEGIN_NAMESPACE
 
-class ConfigValue;
+class QuarkConfigValue;
 
-// Restricted domain types for users of quark: bool, int64_t, double, string, array
-using ConfigArray = std::vector<ConfigValue>; 
-using BasicConfigValue = std::variant<bool, int64_t, double, std::string, ConfigArray>;
+// Restricted domain types for users of Quark: bool, int64_t, double, string, array
+using QuarkConfigArray = std::vector<QuarkConfigValue>; 
+using BasicQuarkConfigValue = std::variant<bool, int64_t, double, std::string, QuarkConfigArray>;
 
 // Proxy node enabling chain operator[] without exposing toml::node_view
-class ConfigValue {
+class QuarkConfigValue {
 public:
-    ConfigValue() = default;
-    explicit ConfigValue(BasicConfigValue val) : val_(std::move(val)) {}
+    QuarkConfigValue() = default;
+    explicit QuarkConfigValue(BasicQuarkConfigValue val) : val_(std::move(val)) {}
 
     [[nodiscard]] bool has_value() const noexcept { return val_.has_value(); }
 
@@ -49,24 +49,25 @@ public:
         return std::forward<T>(default_val);
     }
 private:
-    std::optional<BasicConfigValue> val_;
+    std::optional<BasicQuarkConfigValue> val_;
 };
 
 // PImpl to separate the toml::table dependency
-class QUARK_API Config {
+class QUARK_API QuarkConfig {
 public:
-    Config();
-    ~Config() = default;
+    QuarkConfig();
+    ~QuarkConfig();
 
-    Config(const Config& other) = delete;
-    Config& operator=(const Config& other) = delete;
+    QuarkConfig(const QuarkConfig& other) = delete;
+    QuarkConfig& operator=(const QuarkConfig& other) = delete;
 
-    Config(Config&& other) noexcept = default;
-    Config& operator=(Config&& other) noexcept = default;
+    // Defined out-of-line: QuarkConfigImpl is incomplete here
+    QuarkConfig(QuarkConfig&& other) noexcept;
+    QuarkConfig& operator=(QuarkConfig&& other) noexcept;
 
     // Factory methods for loading configs
-    [[nodiscard]] static std::optional<Config> load_file(std::string_view file_path) noexcept;
-    [[nodiscard]] static std::optional<Config> load_string(std::string_view str) noexcept;
+    [[nodiscard]] static std::optional<QuarkConfig> load_file(std::string_view file_path) noexcept;
+    [[nodiscard]] static std::optional<QuarkConfig> load_string(std::string_view str) noexcept;
 
     // Dot-path lookup: cfg.get_or("A.B.C") or cfg.get("D.E")
     template <typename T>
@@ -87,17 +88,21 @@ public:
         return std::nullopt;
     }
 
+    // Names of the tables nested directly under `path` ("" for the root), in key order.
+    // e.g. "log" -> {"app", "net"} for [log.app] and [log.net]
+    [[nodiscard]] std::vector<std::string> table_names(std::string_view path) const;
+
     // Chaining subscript operator: cfg["A"]["B"]["C"]
-    [[nodiscard]] ConfigValue operator[](std::string_view path) const noexcept {
+    [[nodiscard]] QuarkConfigValue operator[](std::string_view path) const noexcept {
         auto val = get_impl(path);
-        return val.value_or(ConfigValue{});
+        return val.value_or(QuarkConfigValue{});
     }
 
 private:
-    [[nodiscard]] std::optional<ConfigValue> get_impl(std::string_view path) const noexcept;
+    [[nodiscard]] std::optional<QuarkConfigValue> get_impl(std::string_view path) const noexcept;
 
-    struct ConfigImpl;
-    std::unique_ptr<ConfigImpl> impl_;
+    struct QuarkConfigImpl;
+    std::unique_ptr<QuarkConfigImpl> impl_;
 };
 
 QUARK_END_NAMESPACE
