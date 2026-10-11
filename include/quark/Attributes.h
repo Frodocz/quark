@@ -68,6 +68,17 @@ inline constexpr int Version{QUARK_VERSION_MAJOR * 10000 + QUARK_VERSION_MINOR *
 #endif
 
 /**
+ * Packed
+ */
+#ifndef QUARK_PACKED
+    #if QUARK_HAS_ATTRIBUTE(packed)
+        #define QUARK_PACKED __attribute__((packed))
+    #else
+        #define QUARK_PACKED
+    #endif
+#endif
+
+/**
  * Prevents the compiler from inlining a function
  */
 #ifndef QUARK_NOINLINE

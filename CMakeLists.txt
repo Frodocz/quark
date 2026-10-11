@@ -96,6 +96,11 @@ endif ()
 # Dependency Management
 #-------------------------------------------------------------------------------------------------------
 include(FetchContent)
+FetchContent_Declare(
+    absl
+    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+    GIT_TAG        20260817.0
+)
 
 FetchContent_Declare(
     quill
@@ -111,6 +116,12 @@ FetchContent_Declare(
 
 # whether to use std::format or use external fmtlib
 set(QUARK_USE_STD_FORMAT OFF)
+
+ # must be set before FetchContent_MakeAvailable / add_subdirectory
+set(ABSL_PROPAGATE_CXX_STD ON)
+set(ABSL_ENABLE_INSTALL ON)
+# disable building Abseil's internal tests to speed up compile time
+set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # GCC 13.1 and above fully support std::format
@@ -130,7 +141,7 @@ else()
     message(STATUS "Configuring with quill bundled fmtlib (Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
 endif ()
 
-FetchContent_MakeAvailable(quill tomlplusplus)
+FetchContent_MakeAvailable(absl quill tomlplusplus)
 
 #-------------------------------------------------------------------------------------------------------
 # Log Info
@@ -197,11 +208,19 @@ set(HEADER_FILES
         include/quark/QuarkError.h
         include/quark/QuarkFormat.h
         include/quark/QuarkLog.h
+
+        include/quark/utils/DateTime.h
+        include/quark/utils/RdtscClock.h
+
+        # third party header-only libs
+        include/quark/third_party/tscns/tscns.h
 )
 
 set(SOURCE_FILES
         src/QuarkConfig.cpp
         src/QuarkLog.cpp
+
+        src/utils/DateTime.cpp
 )
 
 # Add as a library
@@ -213,6 +232,8 @@ add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
 target_link_libraries(${TARGET_NAME}
         PRIVATE
             $<BUILD_INTERFACE:tomlplusplus::tomlplusplus>
+            absl::strings 
+            absl::flat_hash_map
         PUBLIC
             quill::quill
             Threads::Threads
