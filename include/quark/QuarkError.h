@@ -52,4 +52,10 @@ private:
 
 QUARK_END_EXPORT
 
+#define QUARK_ASSERT(cond, ...) {                                    \
+        if (!(cond)) {                                               \
+            QUARK_THROW(quark::QuarkError{"Assert failed: " #cond}); \
+        }                                                            \
+    }
+
 QUARK_END_NAMESPACE

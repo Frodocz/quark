@@ -210,9 +210,14 @@ set(HEADER_FILES
         include/quark/QuarkLog.h
 
         include/quark/utils/DateTime.h
+        include/quark/utils/MMapFile.h
         include/quark/utils/RdtscClock.h
 
         # third party header-only libs
+        include/quark/third_party/SPSC_Queue/SPSCQueue.h
+        include/quark/third_party/SPSC_Queue/SPSCQueueOPT.h
+        include/quark/third_party/SPSC_Queue/SPSCVarQueue.h
+        include/quark/third_party/SPSC_Queue/SPSCVarQueueOPT.h
         include/quark/third_party/tscns/tscns.h
 )
 
@@ -221,6 +226,7 @@ set(SOURCE_FILES
         src/QuarkLog.cpp
 
         src/utils/DateTime.cpp
+        src/utils/MMapFile.cpp
 )
 
 # Add as a library
