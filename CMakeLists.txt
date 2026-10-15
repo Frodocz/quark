@@ -109,6 +109,12 @@ FetchContent_Declare(
 )
 
 FetchContent_Declare(
+    simdjson
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG        v5.0.3
+)
+
+FetchContent_Declare(
     tomlplusplus
     GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
     GIT_TAG        v3.4.0
@@ -141,7 +147,7 @@ else()
     message(STATUS "Configuring with quill bundled fmtlib (Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
 endif ()
 
-FetchContent_MakeAvailable(absl quill tomlplusplus)
+FetchContent_MakeAvailable(absl quill simdjson tomlplusplus)
 
 #-------------------------------------------------------------------------------------------------------
 # Log Info
@@ -210,6 +216,8 @@ set(HEADER_FILES
         include/quark/QuarkLog.h
 
         include/quark/utils/DateTime.h
+        include/quark/utils/FullDuplexShm.h
+        include/quark/utils/JsonParser.h
         include/quark/utils/MMapFile.h
         include/quark/utils/RdtscClock.h
 
@@ -240,6 +248,7 @@ target_link_libraries(${TARGET_NAME}
             $<BUILD_INTERFACE:tomlplusplus::tomlplusplus>
             absl::strings 
             absl::flat_hash_map
+            simdjson::simdjson
         PUBLIC
             quill::quill
             Threads::Threads

@@ -1,8 +1,10 @@
+#define QUARK_LOG_COMPONENT "quark.config"
+
 #include "quark/utils/MMapFile.h"
 
 #include "quark/QuarkError.h"
 #include "quark/QuarkFormat.h"
-#include "quark/QuarkLog.h"
+#include "detail/InternalLog.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -51,6 +53,7 @@ bool MMapFile::initialize_impl(const Options& options, bool& truncated) {
         size_ = options.size;
         addr_ = reinterpret_cast<uint8_t*>(mmap(nullptr, size_, prot, map_flags, 0, 0));
         if (addr_ == MAP_FAILED) {
+            QUARK_LOG_ERROR("Failed to mmap: {}", std::strerror(errno));
             return false;
         }
         truncated = true;
@@ -67,20 +70,24 @@ bool MMapFile::initialize_impl(const Options& options, bool& truncated) {
         }
         int fd = open(options.filename.c_str(), file_flags, options.mode);
         if (fd == -1) {
+            QUARK_LOG_ERROR("Failed to open file {}: {}", options.filename, std::strerror(errno));
             return false;
         }
         struct stat st;
         if (fstat(fd, &st)) {
+            QUARK_LOG_ERROR("Failed to fstat {}: {}", options.filename, std::strerror(errno));
             return false;
         }
         if (options.writable && (st.st_mode & 0777) != options.mode) {
             if (fchmod(fd, options.mode) != 0) {
+                QUARK_LOG_ERROR("Failed to chmod {}: {}", options.filename, std::strerror(errno));
                 return false;
             }
         }
         if (options.writable && options.size != 0 && static_cast<int64_t>(options.size) != st.st_size) {
             size_ = options.size;
             if (ftruncate(fd, size_)) {
+                QUARK_LOG_ERROR("Failed to ftruncate {}: {}", options.filename, std::strerror(errno));
                 return false;
             }
             truncated = true;
@@ -90,10 +97,12 @@ bool MMapFile::initialize_impl(const Options& options, bool& truncated) {
         }
         addr_ = reinterpret_cast<uint8_t *>(mmap(nullptr, size_, prot, map_flags, fd, 0));
         if (addr_ == MAP_FAILED) {
+            QUARK_LOG_ERROR("Failed to mmap {}: {}", options.filename, std::strerror(errno));
             return false;
         }
         fd_ = fd;
         if (options.lock && mlock(addr_, size_)) {
+            QUARK_LOG_ERROR("Failed to mlock (size: {}): {}", size_, std::strerror(errno));
             return false;
         }
     }
