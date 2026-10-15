@@ -33,6 +33,33 @@ struct QuarkConfig::QuarkConfigImpl {
         }
         return QuarkConfigValue{};
     }
+
+    // toml++ throws parse_error when exceptions are enabled and returns a parse_result otherwise,
+    // on_error gets the parse_error, or nullptr for any other exception
+    template <typename Parse, typename OnError>
+    static std::optional<QuarkConfig> load(Parse&& parse, OnError&& on_error) noexcept {
+#if TOML_EXCEPTIONS
+        try {
+            QuarkConfig cfg;
+            cfg.impl_->tbl_ = parse();
+            return cfg;
+        } catch (const toml::parse_error& e) {
+            on_error(&e);
+        } catch (...) {
+            on_error(nullptr);
+        }
+        return std::nullopt;
+#else
+        toml::parse_result result = parse();
+        if (!result) {
+            on_error(&result.error());
+            return std::nullopt;
+        }
+        QuarkConfig cfg;
+        cfg.impl_->tbl_ = std::move(result).table();
+        return cfg;
+#endif
+    }
 };
 
 QuarkConfig::QuarkConfig() : impl_(std::make_unique<QuarkConfigImpl>()) {}
@@ -41,35 +68,25 @@ QuarkConfig::QuarkConfig(QuarkConfig&& other) noexcept = default;
 QuarkConfig& QuarkConfig::operator=(QuarkConfig&& other) noexcept = default;
 
 std::optional<QuarkConfig> QuarkConfig::load_file(std::string_view file_path) noexcept {
-    try {
-        toml::table tbl = toml::parse_file(file_path);
-        QuarkConfig cfg;
-        cfg.impl_->tbl_ = std::move(tbl);
-        return cfg;
-    } catch (const toml::parse_error& e) {
-        QUARK_LOG_WARN("failed to load config file {}:{}:{}: {}", file_path, e.source().begin.line,
-                       e.source().begin.column, e.description());
-        return std::nullopt;
-    } catch (...) {
-        QUARK_LOG_WARN("failed to load config file {}", file_path);
-        return std::nullopt;
-    }
+    return QuarkConfigImpl::load([&] { return toml::parse_file(file_path); }, [&](const toml::parse_error* e) {
+        if (e) {
+            QUARK_LOG_WARN("failed to load config file {}:{}:{}: {}", file_path, e->source().begin.line,
+                           e->source().begin.column, e->description());
+        } else {
+            QUARK_LOG_WARN("failed to load config file {}", file_path);
+        }
+    });
 }
 
 std::optional<QuarkConfig> QuarkConfig::load_string(std::string_view str) noexcept {
-    try {
-        toml::table tbl = toml::parse(str);
-        QuarkConfig cfg;
-        cfg.impl_->tbl_ = std::move(tbl);
-        return cfg;
-    } catch (const toml::parse_error& e) {
-        QUARK_LOG_WARN("failed to parse config string at {}:{}: {}", e.source().begin.line,
-                       e.source().begin.column, e.description());
-        return std::nullopt;
-    } catch (...) {
-        QUARK_LOG_WARN("failed to parse config string");
-        return std::nullopt;
-    }
+    return QuarkConfigImpl::load([&] { return toml::parse(str); }, [&](const toml::parse_error* e) {
+        if (e) {
+            QUARK_LOG_WARN("failed to parse config string at {}:{}: {}", e->source().begin.line,
+                           e->source().begin.column, e->description());
+        } else {
+            QUARK_LOG_WARN("failed to parse config string");
+        }
+    });
 }
 
 std::vector<std::string> QuarkConfig::table_names(std::string_view path) const {

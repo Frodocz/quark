@@ -128,6 +128,10 @@ set(ABSL_PROPAGATE_CXX_STD ON)
 set(ABSL_ENABLE_INSTALL ON)
 # disable building Abseil's internal tests to speed up compile time
 set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+# quark exposes simdjson in its public headers (JsonParser.h), so simdjson must export its own targets
+set(SIMDJSON_INSTALL ON CACHE BOOL "" FORCE)
+# quill is exposed through QuarkLog.h, so it installs its own headers, config and targets alongside quark
+set(QUILL_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # GCC 13.1 and above fully support std::format
@@ -243,14 +247,15 @@ add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
 # Link dependencies
 # quill is PUBLIC: QuarkLog.h macros expand to quill code in the user's translation units
+# simdjson is PUBLIC: JsonParser.h includes simdjson.h and returns simdjson types
 target_link_libraries(${TARGET_NAME}
         PRIVATE
             $<BUILD_INTERFACE:tomlplusplus::tomlplusplus>
             absl::strings 
             absl::flat_hash_map
-            simdjson::simdjson
         PUBLIC
             quill::quill
+            simdjson::simdjson
             Threads::Threads
 )
 
@@ -335,6 +340,23 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     # (e.g. -pthread on FreeBSD, -lpthread on older Linux, empty where pthread is in libc).
     set(QUARK_PTHREAD_LIBS "${CMAKE_THREAD_LIBS_INIT}")
 
+    # PUBLIC compile definitions must reach pkg-config users too, see target_compile_definitions above
+    if (QUARK_LOG_HUGE_PAGES)
+        set(QUARK_LOG_HUGE_PAGES_VALUE 1)
+    else ()
+        set(QUARK_LOG_HUGE_PAGES_VALUE 0)
+    endif ()
+
+    # absl is PRIVATE, but a static quark still needs it on the user's link line, and pkg-config only
+    # adds Requires.private libs with --static, so promote it to Requires for static builds
+    set(QUARK_PKGCONFIG_REQUIRES "quill simdjson")
+    set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "")
+    if (BUILD_SHARED_LIBS)
+        set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "absl_strings absl_flat_hash_map")
+    else ()
+        string(APPEND QUARK_PKGCONFIG_REQUIRES " absl_strings absl_flat_hash_map")
+    endif ()
+
     # ---- pkg-config ---- #
     # Generate pkgconfig
     configure_file(
@@ -363,10 +385,12 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     # Install the headers
     install(DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/include/quark DESTINATION ${QUARK_INC_DIR})
 
-    # Get the real target name and insert into export set
-    set(DEPENDENCY_TARGETS quill)
+    # simdjson only installs its headers when SIMDJSON_SINGLEHEADER is on, which is a top-level-only
+    # option that also enables python amalgamation, so install the pre-generated single header ourselves
+    install(FILES ${simdjson_SOURCE_DIR}/singleheader/simdjson.h DESTINATION ${QUARK_INC_DIR})
+
     # Install the library
-    install(TARGETS ${TARGET_NAME} ${DEPENDENCY_TARGETS} EXPORT ${targets_export_name}
+    install(TARGETS ${TARGET_NAME} EXPORT ${targets_export_name}
             LIBRARY DESTINATION ${QUARK_LIB_DIR}
             ARCHIVE DESTINATION ${QUARK_LIB_DIR}
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

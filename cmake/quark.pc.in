@@ -1,8 +1,12 @@
-includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+prefix=@CMAKE_INSTALL_PREFIX@
+includedir=${prefix}/@QUARK_INC_DIR@
+libdir=${prefix}/@QUARK_LIB_DIR@
 
 Name: quark
 Description: Ultra-low-latency C++20 utility library for performance-critical applications
 URL: https://github.com/Frodocz/quark
 Version: @QUARK_VERSION@
-CFlags: -I${includedir}
-Libs: @QUARK_PTHREAD_LIBS@
+Requires: @QUARK_PKGCONFIG_REQUIRES@
+Requires.private: @QUARK_PKGCONFIG_REQUIRES_PRIVATE@
+Cflags: -I${includedir} -DQUARK_LOG_INITIAL_QUEUE_CAPACITY=@QUARK_LOG_INITIAL_QUEUE_CAPACITY@ -DQUARK_LOG_HUGE_PAGES=@QUARK_LOG_HUGE_PAGES_VALUE@@QUARK_PKGCONFIG_CFLAGS@
+Libs: -L${libdir} -lquark @QUARK_PTHREAD_LIBS@
