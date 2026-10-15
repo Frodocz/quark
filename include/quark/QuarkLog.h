@@ -15,9 +15,6 @@
 //   level = "Debug"
 //   filename = "logs/net.log"
 //
-//   [log.quark]                # optional: quark's own logger, defaults if absent
-//   level = "Warn"
-//
 //   auto cfg = quark::QuarkConfig::load_file("app.toml");   // the whole application config
 //   quark::ScopedLog scoped_log{*cfg};                       // reads its [log] tables
 //   quark::Logger net = quark::get_logger("net");
@@ -47,6 +44,9 @@
 #include <vector>
 
 QUARK_BEGIN_NAMESPACE
+
+class Logger;
+extern QUARK_API quark::Logger* quark_root_logger;
 
 // -----------------------------------------------------------------------------
 // Configuration
@@ -319,3 +319,9 @@ QUARK_END_NAMESPACE
 #define QLOG_INFO(logger, fmt_str, ...)  QUILL_LOG_INFO(logger, fmt_str, ##__VA_ARGS__)
 #define QLOG_WARN(logger, fmt_str, ...)  QUILL_LOG_WARNING(logger, fmt_str, ##__VA_ARGS__)
 #define QLOG_ERROR(logger, fmt_str, ...) QUILL_LOG_ERROR(logger, fmt_str, ##__VA_ARGS__)
+
+// internal logging with default root logger
+#define QUARK_LOG_DEBUG(fmt_str, ...) QUILL_LOG_DEBUG(::quark::quark_root_logger, fmt_str, ##__VA_ARGS__)
+#define QUARK_LOG_INFO(fmt_str, ...)  QUILL_LOG_INFO(::quark::quark_root_logger, fmt_str, ##__VA_ARGS__)
+#define QUARK_LOG_WARN(fmt_str, ...)  QUILL_LOG_WARNING(::quark::quark_root_logger, fmt_str, ##__VA_ARGS__)
+#define QUARK_LOG_ERROR(fmt_str, ...) QUILL_LOG_ERROR(::quark::quark_root_logger, fmt_str, ##__VA_ARGS__)

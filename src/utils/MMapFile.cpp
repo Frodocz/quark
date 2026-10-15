@@ -4,7 +4,8 @@
 
 #include "quark/QuarkError.h"
 #include "quark/QuarkFormat.h"
-#include "detail/InternalLog.h"
+#include "quark/QuarkLog.h"
+// #include "detail/InternalLog.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>

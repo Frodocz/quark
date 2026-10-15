@@ -24,6 +24,7 @@ int main(int argc, char** argv) {
     //    quark::ScopedLog{*cfg}.
     quark::ScopedLog scoped_log{*cfg, profile};
     std::cout << "logging with profile [" << profile << "], see logs/" << std::endl;
+    QUARK_LOG_ERROR("logging with profile [{}], see logs/", profile);
 
     // 3. Look the loggers up once and keep the handles, they are cheap to copy.
     quark::Logger app = quark::get_logger("app");

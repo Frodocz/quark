@@ -1,8 +1,9 @@
 #define QUARK_LOG_COMPONENT "quark.config"
 
 #include "quark/QuarkConfig.h"
+#include "quark/QuarkLog.h"
 
-#include "detail/InternalLog.h"
+// #include "detail/InternalLog.h"
 #include "toml++/toml.hpp"
 
 QUARK_BEGIN_NAMESPACE

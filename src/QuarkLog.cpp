@@ -2,7 +2,7 @@
 
 #include "quark/QuarkLog.h"
 
-#include "detail/InternalLog.h"
+// #include "detail/InternalLog.h"
 #include "quark/QuarkConfig.h"
 #include "quark/QuarkError.h"
 
@@ -28,10 +28,12 @@
 
 QUARK_BEGIN_NAMESPACE
 
+QUARK_API quark::Logger* quark_root_logger = nullptr;
+
 namespace {
 
 constexpr const char* kDefaultPattern{
-    "%(time) [%(thread_id)] %(short_source_location:<28) %(log_level:<9) %(logger:<12) %(message)"};
+    "%(time) [%(thread_id)] %(short_source_location:<20) %(log_level:<8) %(logger:<6) %(message)"};
 constexpr const char* kDefaultTimestampPattern{"%Y-%m-%d %H:%M:%S.%Qus"};
 constexpr const char* kConsoleSinkName{"quark_console"};
 constexpr const char* kNullSinkName{"quark_null"};
@@ -295,6 +297,7 @@ bool init_log(const LogConfig& config) {
     const auto quark_it = config.loggers.find(quark_name);
     const LogOptions quark_options = quark_it != config.loggers.end() ? quark_it->second : LogOptions{};
     ctx.root = detail::LoggerFactory::create_locked(ctx, quark_name, quark_options);
+    quark_root_logger = &ctx.root;
 
     std::string names{quark_name};
     for (const auto& [name, options] : config.loggers) {
@@ -356,34 +359,34 @@ Logger get_logger(std::string_view name) noexcept {
 // -----------------------------------------------------------------------------
 // quark-internal logging, see detail/InternalLog.h
 // -----------------------------------------------------------------------------
-Logger detail::quark_logger() noexcept {
-    auto& ctx = context();
-    return ctx.state.load(std::memory_order_acquire) == State::Running ? ctx.root : Logger{};
-}
+// Logger detail::quark_logger() noexcept {
+//     auto& ctx = context();
+//     return ctx.state.load(std::memory_order_acquire) == State::Running ? ctx.root : Logger{};
+// }
 
-void detail::write_stderr(LogLevel level, const char* component, const char* file, uint32_t line,
-                          std::string_view message) noexcept {
-    static constexpr char kLevelChar[] = {'D', 'I', 'W', 'E', 'O'};
-    thread_local const auto tid = static_cast<unsigned long long>(::syscall(SYS_gettid));
+// void detail::write_stderr(LogLevel level, const char* component, const char* file, uint32_t line,
+//                           std::string_view message) noexcept {
+//     static constexpr char kLevelChar[] = {'D', 'I', 'W', 'E', 'O'};
+//     thread_local const auto tid = static_cast<unsigned long long>(::syscall(SYS_gettid));
 
-    const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
-    const std::time_t secs = std::chrono::duration_cast<std::chrono::seconds>(since_epoch).count();
-    const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(since_epoch).count() % 1'000'000;
-    std::tm tm{};
-    ::localtime_r(&secs, &tm);
+//     const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
+//     const std::time_t secs = std::chrono::duration_cast<std::chrono::seconds>(since_epoch).count();
+//     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(since_epoch).count() % 1'000'000;
+//     std::tm tm{};
+//     ::localtime_r(&secs, &tm);
 
-    std::string_view filename{file};
-    if (const auto pos = filename.find_last_of('/'); pos != std::string_view::npos) {
-        filename.remove_prefix(pos + 1);
-    }
+//     std::string_view filename{file};
+//     if (const auto pos = filename.find_last_of('/'); pos != std::string_view::npos) {
+//         filename.remove_prefix(pos + 1);
+//     }
 
-    // `W20261008 12:34:56.789012 4242 QuarkConfig.cpp:42] [quark.config] message`. One fprintf per
-    // record: stderr is unbuffered, so lines from different threads don't interleave.
-    std::fprintf(stderr, "%c%04d%02d%02d %02d:%02d:%02d.%06lld %llu %.*s:%u] [%s] %.*s\n",
-                 kLevelChar[static_cast<uint8_t>(level) % sizeof(kLevelChar)], tm.tm_year + 1900, tm.tm_mon + 1,
-                 tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<long long>(micros), tid,
-                 static_cast<int>(filename.size()), filename.data(), line, component,
-                 static_cast<int>(message.size()), message.data());
-}
+//     // `W20261008 12:34:56.789012 4242 QuarkConfig.cpp:42] [quark.config] message`. One fprintf per
+//     // record: stderr is unbuffered, so lines from different threads don't interleave.
+//     std::fprintf(stderr, "%c%04d%02d%02d %02d:%02d:%02d.%06lld %llu %.*s:%u] [%s] %.*s\n",
+//                  kLevelChar[static_cast<uint8_t>(level) % sizeof(kLevelChar)], tm.tm_year + 1900, tm.tm_mon + 1,
+//                  tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<long long>(micros), tid,
+//                  static_cast<int>(filename.size()), filename.data(), line, component,
+//                  static_cast<int>(message.size()), message.data());
+// }
 
 QUARK_END_NAMESPACE
