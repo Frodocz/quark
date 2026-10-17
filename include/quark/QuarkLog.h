@@ -1,28 +1,14 @@
 #pragma once
 
-// quark logging, built on the embedded quill.
+// quark logging, built on quill. quill has a single backend per process, so:
+//   - only the process (main) calls init_log() and owns the backend, either quill's own thread or,
+//     with `manual_backend`, a LogPoller on a thread of its choosing;
+//   - libraries (quark itself, networking, strategies) only call get_logger(), never quill::Backend.
 //
-// Every logger is declared up front in the application's TOML config and created by init_log():
-//
-//   [log]                      # global: frontend queue type and backend thread affinity
-//   queue_type = "BoundedDropping"
-//   cpu_affinity = [3]
-//
-//   [log.app]                  # one table per logger, named by the user
-//   level = "Info"
-//
-//   [log.net]
-//   level = "Debug"
-//   filename = "logs/net.log"
-//
-//   auto cfg = quark::QuarkConfig::load_file("app.toml");   // the whole application config
-//   quark::ScopedLog scoped_log{*cfg};                       // reads its [log] tables
-//   quark::Logger net = quark::get_logger("net");
+//   auto cfg = quark::QuarkConfig::load_file("app.toml");
+//   quark::ScopedLog scoped_log{*cfg};                  // reads [log] and [log.<name>]
+//   quark::Logger* net = quark::get_logger("net");
 //   QLOG_INFO(net, "connected to {}:{}", host, port);
-//
-// After init_log() the set of loggers is fixed; only their levels can change at runtime. quark's
-// internal records go to the "quark" logger, tagged with their component, e.g. "[quark.config]".
-// Before init_log() and after shutdown_log(), quark's own warnings and errors go to stderr.
 
 #ifndef QUILL_DISABLE_NON_PREFIXED_MACROS
     #define QUILL_DISABLE_NON_PREFIXED_MACROS
@@ -30,6 +16,7 @@
 
 #include "quark/Attributes.h"
 
+#include "quill/Frontend.h"
 #include "quill/LogMacros.h"
 #include "quill/Logger.h"
 
@@ -40,253 +27,123 @@
 #include <map>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <vector>
+
+// Frontend queue settings, fixed at build time and shared by every logger of the process:
+// -DQUARK_LOG_QUEUE_TYPE=..., -DQUARK_LOG_INITIAL_QUEUE_CAPACITY=<bytes>, -DQUARK_LOG_HUGE_PAGES=ON|OFF.
+#ifndef QUARK_LOG_QUEUE_TYPE
+    #define QUARK_LOG_QUEUE_TYPE BoundedDropping
+#endif
+#ifndef QUARK_LOG_INITIAL_QUEUE_CAPACITY
+    #define QUARK_LOG_INITIAL_QUEUE_CAPACITY (2u * 1024u * 1024u)
+#endif
+#ifndef QUARK_LOG_HUGE_PAGES
+    #define QUARK_LOG_HUGE_PAGES 1
+#endif
 
 QUARK_BEGIN_NAMESPACE
 
-class Logger;
-extern QUARK_API quark::Logger* quark_root_logger;
-
-// -----------------------------------------------------------------------------
-// Configuration
-// -----------------------------------------------------------------------------
 class QuarkConfig;
 
-// quark's own log-level enum so users never need to name quill:: types.
-enum class LogLevel : uint8_t {
-    Debug,
-    Info,
-    Warn,
-    Error,
-    Off,  // Only valid as a threshold: disables the logger.
+struct FrontendOptions : quill::FrontendOptions {
+    static constexpr quill::QueueType queue_type = quill::QueueType::QUARK_LOG_QUEUE_TYPE;
+    static constexpr std::size_t initial_queue_capacity = QUARK_LOG_INITIAL_QUEUE_CAPACITY;
+    static constexpr quill::HugePagesPolicy huge_pages_policy =
+        QUARK_LOG_HUGE_PAGES ? quill::HugePagesPolicy::Try : quill::HugePagesPolicy::Never;
 };
 
-constexpr LogLevel parse_log_level(std::string_view str) {
-    if (str == "DEBUG" || str == "debug" || str == "Debug") return LogLevel::Debug;
-    if (str == "INFO" || str == "Info" || str == "info") return LogLevel::Info;
-    if (str == "WARN" || str == "Warn" || str == "warn") return LogLevel::Warn;
-    if (str == "ERROR" || str == "Error" || str == "error") return LogLevel::Error;
-    if (str == "OFF" || str == "Off" || str == "off") return LogLevel::Off;
-    return LogLevel::Info;
-}
-
-enum class QueueType : uint8_t {
-    UnboundedBlocking, // Small initial capacity and reallocates up to unbounded_queue_max_capacity (2 GiB) then block
-    UnboundedDropping, // Small initial capacity and reallocates up to unbounded_queue_max_capacity (2 GiB) then drop
-    BoundedBlocking,   // Fixed initial capacity and never reallocates, blocks the calling thread until space is available
-    BoundedDropping,   // Fixed initial capacity and never reallocates, discards log messages when the limit is reached.
-};
-
-constexpr QueueType parse_queue_type(std::string_view str) {
-    if (str == "UnboundedBlocking") return QueueType::UnboundedBlocking;
-    if (str == "UnboundedDropping") return QueueType::UnboundedDropping;
-    if (str == "BoundedBlocking") return QueueType::BoundedBlocking;
-    if (str == "BoundedDropping") return QueueType::BoundedDropping;
-    return QueueType::BoundedDropping;
-}
+using Frontend = quill::FrontendImpl<FrontendOptions>;
+using Logger = quill::LoggerImpl<FrontendOptions>;
 
 // Name of quark's own logger, configured by the optional [log.quark] table.
 inline constexpr std::string_view kQuarkLoggerName{"quark"};
 
-// Capacity in bytes of each logging thread's queue: the fixed size of a bounded queue, the starting
-// size of an unbounded one. Shared by all loggers used on that thread. quill only accepts it at
-// compile time, so it is a build option (-DQUARK_LOG_INITIAL_QUEUE_CAPACITY=...), not a config key.
-#ifndef QUARK_LOG_INITIAL_QUEUE_CAPACITY
-    #define QUARK_LOG_INITIAL_QUEUE_CAPACITY (2u * 1024u * 1024u)
-#endif
-inline constexpr std::size_t kLogInitialQueueCapacity{QUARK_LOG_INITIAL_QUEUE_CAPACITY};
-static_assert(kLogInitialQueueCapacity > 0, "QUARK_LOG_INITIAL_QUEUE_CAPACITY must be a positive number of bytes");
-
-// Back those queues with 2 MiB huge pages to cut TLB misses on the logging threads, falling back to
-// normal pages when the machine has none available (see vm.nr_hugepages). Build option
-// -DQUARK_LOG_HUGE_PAGES=ON|OFF.
-#ifndef QUARK_LOG_HUGE_PAGES
-    #define QUARK_LOG_HUGE_PAGES 1
-#endif
-inline constexpr bool kLogHugePages{QUARK_LOG_HUGE_PAGES != 0};
-
-// Process-wide settings, read from the top-level [log] table. quill fixes them for the whole
-// process, so they cannot be set per logger.
-struct QUARK_API LogGlobalOptions {
-    // --- Queue type and memory allocation policies (frontend option) ---
-    QueueType queue_type{QueueType::BoundedDropping};
-
-    // --- Set CPU affinity for the backend thread (backend option) ---
-    // Defaults to core 0; set it to the core reserved for logging. Empty means no pinning. If the core
-    // is not available the backend still runs, unpinned, and quill prints a warning.
-    std::vector<int64_t> cpu_affinity{0};
-
-    // --- Backend polling (backend option) ---
-    // How long the backend thread sleeps once every queue is empty, `backend_sleep_ns` in [log].
-    // Defaults to 0, busy-polling: lowest latency from log call to file, but the thread spins at 100%
-    // of its core, hence the pinning above.
-    std::chrono::nanoseconds backend_sleep_duration{0};
-    // Only with backend_sleep_duration == 0: yield the core when idle instead of spinning.
-    bool backend_yield_when_idle{false};
+// Backend settings, read from the [log] table.
+struct QUARK_API LogBackendOptions {
+    // Drive the backend from a LogPoller instead of quill's own thread.
+    bool manual_backend{false};
+    // Cores of quill's backend thread, empty means no pinning. `cpu_affinity` in [log].
+    std::vector<uint16_t> cpu_affinity{};
+    // Idle sleep of quill's backend thread, 0 busy-polls. `backend_sleep_ns` in [log].
+    std::chrono::nanoseconds sleep_duration{std::chrono::microseconds{100}};
+    // Only with sleep_duration == 0: yield the core when idle instead of spinning.
+    bool yield_when_idle{false};
 };
 
 // Options of one logger, read from its [log.<name>] table. Missing keys keep these defaults.
-// Only `level` can be changed after init_log(), via Logger::set_level().
 struct QUARK_API LogOptions {
-    // --- Sink selection (either RotatingFile or ConsoleSink, or both) ---
     bool to_console{true};
     bool to_rotating_file{true};
 
-    // Defaults to Debug in Debug builds, Info in optimized (NDEBUG) builds.
 #if defined(NDEBUG)
-    LogLevel level{LogLevel::Info};
+    quill::LogLevel level{quill::LogLevel::Info};
 #else
-    LogLevel level{LogLevel::Debug};
+    quill::LogLevel level{quill::LogLevel::Debug};
 #endif
 
-    // --- Formatting ---
-    // Quill pattern for the log line. Empty uses quark's default pattern.
+    // quill pattern of a log line, empty uses quark's default.
     std::string pattern{};
 
-    // --- RotatingFile options at daily basis ---
-    // Base filename, empty means "logs/<logger name>.log". Rotated files derive from this
-    // (e.g. app.1.log, ...). Loggers that share a filename share the same file sink (the first
-    // config wins).
+    // Empty means "logs/<logger name>.log". Loggers sharing a filename share the file sink.
     std::string filename{};
-    // Roll to a new file once the current one reaches this many bytes. 0 disables size-based rotation.
-    std::int64_t max_file_size_bytes{128 * 1024 * 1024};  // 128 MiB
-    // Keep at most this many rotated files; older ones are removed. Bounds disk
-    // usage for an infinite-loop process. 0 means "no count limit".
+    // 0 disables size-based rotation.
+    std::int64_t max_file_size_bytes{128 * 1024 * 1024};
+    // 0 keeps every rotated file.
     std::int64_t max_backup_files{10};
-    // Also roll daily at this HH:MM (GmtTime). Empty disables time-based rotation.
+    // HH:MM (GMT) of the daily rotation, empty disables it.
     std::string daily_rotation_time{"00:00"};
 
-    // Reads `<section>.<field>` keys, e.g. `log.app.level`.
     static LogOptions load_from_config(const QuarkConfig& cfg, std::string_view section);
 };
 
-// Everything init_log() needs, loaded from the application's config or filled in code.
 struct QUARK_API LogConfig {
-    LogGlobalOptions global;
-    // Logger name -> options. kQuarkLoggerName configures quark's own logger.
+    LogBackendOptions backend;
+    // Options of the loggers get_logger() creates, by name. Others get LogOptions{}.
     std::map<std::string, LogOptions, std::less<>> loggers;
 
-    // Global options from [<section>], one logger per [<section>.<name>] table.
+    // Backend options from [<section>], one logger per [<section>.<name>] table.
     static LogConfig load_from_config(const QuarkConfig& cfg, std::string_view section = "log");
 };
 
-// -----------------------------------------------------------------------------
-// Logger
-// -----------------------------------------------------------------------------
-namespace detail {
-
-constexpr quill::QueueType to_quill_queue_type(QueueType type) noexcept {
-    switch (type) {
-        case QueueType::UnboundedBlocking: return quill::QueueType::UnboundedBlocking;
-        case QueueType::UnboundedDropping: return quill::QueueType::UnboundedDropping;
-        case QueueType::BoundedBlocking:   return quill::QueueType::BoundedBlocking;
-        case QueueType::BoundedDropping:   return quill::QueueType::BoundedDropping;
-    }
-    return quill::QueueType::BoundedDropping;
-}
-
-// Quill selects the frontend queue at compile time, one FrontendOptions type per QueueType.
-template <QueueType Type>
-struct FrontendOptions : quill::FrontendOptions {
-    static constexpr quill::QueueType queue_type = to_quill_queue_type(Type);
-    static constexpr std::size_t initial_queue_capacity = kLogInitialQueueCapacity;
-    static constexpr quill::HugePagesPolicy huge_pages_policy =
-        kLogHugePages ? quill::HugePagesPolicy::Try : quill::HugePagesPolicy::Never;
-};
-
-template <QueueType Type>
-using LoggerImpl = quill::LoggerImpl<FrontendOptions<Type>>;
-
-// Calls f(std::integral_constant<QueueType, type>{}) so f can name the matching compile-time types.
-template <typename F>
-decltype(auto) visit_queue_type(QueueType type, F&& f) {
-    using enum QueueType;
-    switch (type) {
-        case UnboundedBlocking: return f(std::integral_constant<QueueType, UnboundedBlocking>{});
-        case UnboundedDropping: return f(std::integral_constant<QueueType, UnboundedDropping>{});
-        case BoundedBlocking:   return f(std::integral_constant<QueueType, BoundedBlocking>{});
-        case BoundedDropping:
-        default:                return f(std::integral_constant<QueueType, BoundedDropping>{});
-    }
-}
-
-struct LoggerFactory;
-
-}  // namespace detail
-
-// Lightweight, copyable handle to a logger created by init_log(). Obtain one with get_logger(),
-// keep it, and log with QLOG_*(logger, fmt, ...). A default constructed handle is invalid and
-// silently discards log statements.
-class QUARK_API Logger {
-public:
-    Logger() = default;
-
-    [[nodiscard]] bool valid() const noexcept { return logger_ != nullptr; }
-    explicit operator bool() const noexcept { return valid(); }
-
-    [[nodiscard]] std::string_view name() const noexcept;
-    [[nodiscard]] LogLevel level() const noexcept;
-    void set_level(LogLevel level) noexcept; // Thread-safe, takes effect immediately.
-
-    // Blocks until the backend has written every message logged so far by this thread.
-    void flush() const;
-
-    // --- Interface used by the QUILL_LOG_* macros, which QLOG_* expand to ---
-    const Logger* operator->() const noexcept { return this; }
-
-    template <quill::LogLevel Level>
-    [[nodiscard]] bool should_log_statement() const noexcept {
-        return logger_ && logger_->template should_log_statement<Level>();
-    }
-
-    template <bool ImmediateFlush, typename... Args>
-    bool log_statement(quill::MacroMetadata const* metadata, Args&&... args) const {
-        return detail::visit_queue_type(queue_type_, [&](auto type) {
-            return static_cast<detail::LoggerImpl<decltype(type)::value>*>(logger_)
-                ->template log_statement<ImmediateFlush>(metadata, static_cast<Args&&>(args)...);
-        });
-    }
-
-private:
-    friend struct detail::LoggerFactory;
-
-    Logger(quill::detail::LoggerBase* logger, QueueType queue_type) noexcept
-        : logger_(logger), queue_type_(queue_type) {}
-
-    quill::detail::LoggerBase* logger_{nullptr};
-    QueueType queue_type_{QueueType::BoundedDropping};
-};
-
-// -----------------------------------------------------------------------------
-// Lifecycle
-// -----------------------------------------------------------------------------
-// Starts the quill backend (global.cpu_affinity), fixes the frontend queue type
-// (global.queue_type) and creates quark's own logger plus every logger in `config.loggers`.
-// Returns `false` and ignores `config` if logging was already initialized.
-// Throws on invalid options or when a sink cannot be created.
+// Called once by the process owner, before other threads log. Creates the configured loggers and
+// starts quill's backend thread, unless `manual_backend`. Returns false if already called.
+// A logger created by get_logger() earlier keeps its sinks, only its level is applied.
 QUARK_API bool init_log(const LogConfig& config = LogConfig{});
-
-// Same, reading the LogConfig from the [<section>] tables of the application's full config.
 QUARK_API bool init_log(const QuarkConfig& cfg, std::string_view section = "log");
 
-// Creates the calling thread's log queue now instead of on its first log statement, which would
-// otherwise pay for allocating and pre-faulting kLogInitialQueueCapacity bytes. Call it at the start
-// of every latency-sensitive thread, after init_log(). No-op if logging is not running.
-QUARK_API void preallocate_log() noexcept;
-
-// Flushes and stops the backend.
-// Final: get_logger() returns invalid loggers afterwards.
-// Stop logging through QLOG_* in other threads before calling it.
+// Drains every queue and stops quill's backend thread. With `manual_backend` the LogPoller does it.
 QUARK_API void shutdown_log() noexcept;
 
-// Returns the logger created by init_log() for `name`, or an invalid Logger if there is none.
-// Lock-free: the set of loggers never changes after init_log().
-// Look loggers up once and keep the handle rather than calling this per log statement.
-[[nodiscard]] QUARK_API Logger get_logger(std::string_view name) noexcept;
+// Returns the logger `name`, creating it from its config (or defaults) on first use. Never null,
+// thread-safe. Look a logger up once and keep the pointer. Libraries should prefix their names,
+// e.g. "lepton.ws", quill loggers of other components share the same namespace.
+[[nodiscard]] QUARK_API Logger* get_logger(std::string_view name);
 
-// RAII scope for the logging system: init_log() on construction, shutdown_log() on destruction
-// (only if this instance performed the initialization).
+// quark::Frontend::preallocate() creates the calling thread's queue now instead of on its first
+// log statement, call it at the start of latency-sensitive threads.
+
+// Manual backend, with init_log({.backend = {.manual_backend = true}}). Binds the backend to the
+// constructing thread: polling and destruction must happen on that same thread.
+//
+//   quark::LogPoller poller;
+//   while (running) {
+//       poller.poll_for(std::chrono::microseconds{50});
+//   }
+class QUARK_API LogPoller {
+public:
+    LogPoller();   // At most one per process.
+    ~LogPoller();  // Drains every queue and stops the backend.
+
+    LogPoller(const LogPoller&) = delete;
+    LogPoller& operator=(const LogPoller&) = delete;
+
+    // Processes at most one record: lowest, most predictable cost per call.
+    void poll_once();
+    // Drains until empty or until `timeout` elapses.
+    void poll_for(std::chrono::microseconds timeout);
+};
+
+// init_log() on construction, shutdown_log() on destruction if this instance initialized logging.
 class QUARK_API ScopedLog {
 public:
     explicit ScopedLog(const LogConfig& config = LogConfig{}) : owner_(init_log(config)) {}
@@ -299,8 +156,6 @@ public:
 
     ScopedLog(const ScopedLog&) = delete;
     ScopedLog& operator=(const ScopedLog&) = delete;
-    ScopedLog(ScopedLog&&) = delete;
-    ScopedLog& operator=(ScopedLog&&) = delete;
 
     [[nodiscard]] bool owner() const noexcept { return owner_; }
 
@@ -308,20 +163,26 @@ private:
     bool owner_;
 };
 
+namespace detail {
+[[nodiscard]] QUARK_API Logger* quark_logger();
+}  // namespace detail
+
 QUARK_END_NAMESPACE
 
-// -----------------------------------------------------------------------------
-// Logging Macros
-// -----------------------------------------------------------------------------
-// fmt_str must be a string literal using {} placeholders.
-// logger: a quark::Logger from get_logger() (or a pointer to one).
 #define QLOG_DEBUG(logger, fmt_str, ...) QUILL_LOG_DEBUG(logger, fmt_str, ##__VA_ARGS__)
 #define QLOG_INFO(logger, fmt_str, ...)  QUILL_LOG_INFO(logger, fmt_str, ##__VA_ARGS__)
 #define QLOG_WARN(logger, fmt_str, ...)  QUILL_LOG_WARNING(logger, fmt_str, ##__VA_ARGS__)
 #define QLOG_ERROR(logger, fmt_str, ...) QUILL_LOG_ERROR(logger, fmt_str, ##__VA_ARGS__)
 
-// internal logging with default root logger
-#define QUARK_LOG_DEBUG(fmt_str, ...) QUILL_LOG_DEBUG(::quark::quark_root_logger, fmt_str, ##__VA_ARGS__)
-#define QUARK_LOG_INFO(fmt_str, ...)  QUILL_LOG_INFO(::quark::quark_root_logger, fmt_str, ##__VA_ARGS__)
-#define QUARK_LOG_WARN(fmt_str, ...)  QUILL_LOG_WARNING(::quark::quark_root_logger, fmt_str, ##__VA_ARGS__)
-#define QUARK_LOG_ERROR(fmt_str, ...) QUILL_LOG_ERROR(::quark::quark_root_logger, fmt_str, ##__VA_ARGS__)
+// quark's own records, to the "quark" logger. Usable from headers.
+#if defined(QUARK_DISABLE_INTERNAL_LOG)
+    #define QUARK_LOG_DEBUG(fmt_str, ...) (void)0
+    #define QUARK_LOG_INFO(fmt_str, ...)  (void)0
+    #define QUARK_LOG_WARN(fmt_str, ...)  (void)0
+    #define QUARK_LOG_ERROR(fmt_str, ...) (void)0
+#else
+    #define QUARK_LOG_DEBUG(fmt_str, ...) QUILL_LOG_DEBUG(::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
+    #define QUARK_LOG_INFO(fmt_str, ...)  QUILL_LOG_INFO(::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
+    #define QUARK_LOG_WARN(fmt_str, ...)  QUILL_LOG_WARNING(::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
+    #define QUARK_LOG_ERROR(fmt_str, ...) QUILL_LOG_ERROR(::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
+#endif

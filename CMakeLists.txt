@@ -29,6 +29,13 @@ option(QUARK_USE_VALGRIND "Use Valgrind as the default memory checking tool in C
 # Internal option
 set(QUARK_ENABLE_GCC_HARDENING OFF CACHE INTERNAL "")
 set(QUARK_LOG_INITIAL_QUEUE_CAPACITY 2097152 CACHE STRING "Capacity in bytes of each logging thread's queue, default 2MB (quill only accepts it at compile time).")
+set(QUARK_LOG_QUEUE_TYPE BoundedDropping CACHE STRING "Queue type of every logging thread's queue (quill only accepts it at compile time).")
+set_property(CACHE QUARK_LOG_QUEUE_TYPE PROPERTY STRINGS UnboundedBlocking UnboundedDropping BoundedBlocking BoundedDropping)
+if (NOT QUARK_LOG_QUEUE_TYPE MATCHES "^(UnboundedBlocking|UnboundedDropping|BoundedBlocking|BoundedDropping)$")
+    message(FATAL_ERROR "Invalid QUARK_LOG_QUEUE_TYPE: ${QUARK_LOG_QUEUE_TYPE}")
+endif ()
+# Every module of a process must use the same quill, also checked by a static_assert in QuarkLog.cpp
+set(QUARK_QUILL_VERSION 13.0.0)
 
 #-------------------------------------------------------------------------------------------------------
 # Determine if quark is built as a subproject (using add_subdirectory) or if it is the master project.
@@ -103,12 +110,6 @@ FetchContent_Declare(
 )
 
 FetchContent_Declare(
-    quill
-    GIT_REPOSITORY https://github.com/odygrd/quill.git
-    GIT_TAG        v13.0.0
-)
-
-FetchContent_Declare(
     simdjson
     GIT_REPOSITORY https://github.com/simdjson/simdjson.git
     GIT_TAG        v5.0.3
@@ -151,7 +152,20 @@ else()
     message(STATUS "Configuring with quill bundled fmtlib (Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
 endif ()
 
-FetchContent_MakeAvailable(absl quill simdjson tomlplusplus)
+FetchContent_MakeAvailable(absl simdjson tomlplusplus)
+
+# Reuse the quill of the parent project or of the system, fetch it otherwise
+if (NOT TARGET quill::quill)
+    find_package(quill ${QUARK_QUILL_VERSION} EXACT CONFIG QUIET)
+endif ()
+if (NOT TARGET quill::quill)
+    FetchContent_Declare(
+        quill
+        GIT_REPOSITORY https://github.com/odygrd/quill.git
+        GIT_TAG        v${QUARK_QUILL_VERSION}
+    )
+    FetchContent_MakeAvailable(quill)
+endif ()
 
 #-------------------------------------------------------------------------------------------------------
 # Log Info
@@ -173,6 +187,7 @@ message(STATUS "QUARK_ENABLE_INSTALL: " ${QUARK_ENABLE_INSTALL})
 message(STATUS "QUARK_ENABLE_LOGGER: " ${QUARK_ENABLE_LOGGER})
 message(STATUS "QUARK_LOG_HUGE_PAGES: " ${QUARK_LOG_HUGE_PAGES})
 message(STATUS "QUARK_LOG_INITIAL_QUEUE_CAPACITY: " ${QUARK_LOG_INITIAL_QUEUE_CAPACITY})
+message(STATUS "QUARK_LOG_QUEUE_TYPE: " ${QUARK_LOG_QUEUE_TYPE})
 message(STATUS "QUARK_NO_EXCEPTIONS: " ${QUARK_NO_EXCEPTIONS})
 message(STATUS "QUARK_USE_STD_FORMAT: " ${QUARK_USE_STD_FORMAT})
 
@@ -245,6 +260,9 @@ set(SOURCE_FILES
 add_library(${TARGET_NAME} ${SOURCE_FILES} ${HEADER_FILES})
 add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
+# A shared quark finds its installed dependencies (absl, simdjson) next to itself
+set_target_properties(${TARGET_NAME} PROPERTIES INSTALL_RPATH "$ORIGIN")
+
 # Link dependencies
 # quill is PUBLIC: QuarkLog.h macros expand to quill code in the user's translation units
 # simdjson is PUBLIC: JsonParser.h includes simdjson.h and returns simdjson types
@@ -286,14 +304,15 @@ if (QUARK_USE_STD_FORMAT)
     target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_USE_STD_FORMAT)
 endif ()
 
-# PUBLIC: both are part of the logger types in QuarkLog.h, quark and its users must agree on them
+# PUBLIC: quark::FrontendOptions defined in QuarkLog.h, quark users must agree on it
 target_compile_definitions(${TARGET_NAME} PUBLIC
+        QUARK_LOG_QUEUE_TYPE=${QUARK_LOG_QUEUE_TYPE}
         QUARK_LOG_INITIAL_QUEUE_CAPACITY=${QUARK_LOG_INITIAL_QUEUE_CAPACITY}
         QUARK_LOG_HUGE_PAGES=$<BOOL:${QUARK_LOG_HUGE_PAGES}>)
 
-# Compiles quark's internal QUARK_LOG_* statements out entirely
+# Compiles quark's own QUARK_LOG_* statements out, PUBLIC as quark's headers may use them
 if (NOT QUARK_ENABLE_LOGGER)
-    target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_DISABLE_INTERNAL_LOG)
+    target_compile_definitions(${TARGET_NAME} PUBLIC QUARK_DISABLE_INTERNAL_LOG)
 endif ()
 
 #-------------------------------------------------------------------------------------------------------
@@ -345,6 +364,10 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
         set(QUARK_LOG_HUGE_PAGES_VALUE 1)
     else ()
         set(QUARK_LOG_HUGE_PAGES_VALUE 0)
+    endif ()
+    set(QUARK_PKGCONFIG_CFLAGS "")
+    if (NOT QUARK_ENABLE_LOGGER)
+        set(QUARK_PKGCONFIG_CFLAGS " -DQUARK_DISABLE_INTERNAL_LOG")
     endif ()
 
     # absl is PRIVATE, but a static quark still needs it on the user's link line, and pkg-config only

@@ -1,11 +1,8 @@
-#define QUARK_LOG_COMPONENT "quark.config"
-
 #include "quark/utils/MMapFile.h"
 
 #include "quark/QuarkError.h"
 #include "quark/QuarkFormat.h"
 #include "quark/QuarkLog.h"
-// #include "detail/InternalLog.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>

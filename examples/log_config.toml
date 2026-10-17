@@ -1,34 +1,26 @@
-# The application's own settings live next to the logging ones, in the same file.
 [server]
 host = "127.0.0.1"
 port = 8080
 
-# Two logging profiles, pick one by section name: quark::ScopedLog{cfg, "log_hft"} (the example's
-# default) or quark::ScopedLog{cfg, "log_service"}. A deployment normally keeps only the one it uses,
-# under the default section name: quark::ScopedLog{cfg} reads [log].
+# Two logging profiles, picked by section name: quark::ScopedLog{cfg, "log_hft"}. A deployment
+# normally keeps one, as [log], read by quark::ScopedLog{cfg}.
 #
-# Global keys of a profile table, shared by every logger (quill fixes them for the whole process):
-#   queue_type               UnboundedBlocking | UnboundedDropping | BoundedBlocking | BoundedDropping (default)
-#   cpu_affinity             backend thread cores (default [0]); [] disables pinning
-#   backend_sleep_ns         backend idle sleep (default 0 = busy-poll)
-#   backend_yield_when_idle  only with backend_sleep_ns = 0: yield the core instead of spinning
-# Queue capacity and huge pages are build options, shared by both profiles:
-#   -DQUARK_LOG_INITIAL_QUEUE_CAPACITY=<bytes> (default 2 MiB), -DQUARK_LOG_HUGE_PAGES=ON|OFF (default ON)
+# Backend keys of a profile table:
+#   manual_backend           drive the backend from a quark::LogPoller (default false)
+#   cpu_affinity             cores of quill's backend thread (default [], unpinned)
+#   backend_sleep_ns         idle sleep of quill's backend thread (default 100000, 0 busy-polls)
+#   backend_yield_when_idle  only with backend_sleep_ns = 0: yield instead of spinning
+# The queue type, capacity and huge pages are build options: -DQUARK_LOG_QUEUE_TYPE=...,
+# -DQUARK_LOG_INITIAL_QUEUE_CAPACITY=<bytes>, -DQUARK_LOG_HUGE_PAGES=ON|OFF.
 #
 # One sub-table per logger, the table name is the logger name: quark::get_logger("app").
 #   level, to_console, to_rotating_file, pattern, filename (default logs/<name>.log),
 #   max_file_size_bytes, max_backup_files, daily_rotation_time
-# Only the level can be changed at runtime, via Logger::set_level(). The optional "quark" table
-# configures quark's own logger.
+# Loggers without a table get the defaults. [quark] configures quark's own logger.
 
-# -----------------------------------------------------------------------------
-# HFT: hot threads never block or allocate in a log call, the backend busy-polls its own core.
-# -----------------------------------------------------------------------------
+# HFT: the process polls the backend on its own housekeeping thread.
 [log_hft]
-queue_type = "BoundedDropping"     # a full queue drops the message (quill reports it on stderr)
-cpu_affinity = [3]                 # ONE isolated core reserved for logging, not a trading core or its SMT sibling
-backend_sleep_ns = 0               # busy-poll: spins at 100% of that core
-backend_yield_when_idle = false
+manual_backend = true
 
 [log_hft.quark]
 level = "Warn"
@@ -36,26 +28,18 @@ to_console = false
 
 [log_hft.app]
 level = "Info"
-to_console = false                 # console I/O is slow; files only
+to_console = false
 pattern = "%(time) [%(thread_id)] %(log_level:<9) %(logger:<8) %(message)"
 
 [log_hft.net]
 level = "Warn"
 to_console = false
-max_file_size_bytes = 268435456    # 256 MiB
+max_file_size_bytes = 268435456
 max_backup_files = 20
 
-[log_hft.monitor]
-level = "Info"
-to_console = false
-
-# -----------------------------------------------------------------------------
-# Normal services: never lose a message, share cores with the rest of the system.
-# -----------------------------------------------------------------------------
+# Services: quill's backend thread, sleeping when idle.
 [log_service]
-queue_type = "UnboundedBlocking"   # grows when full, then blocks the caller instead of dropping
-cpu_affinity = []                  # unpinned: the scheduler places the backend
-backend_sleep_ns = 100000          # sleep 100 us when idle instead of spinning a core
+backend_sleep_ns = 100000
 
 [log_service.quark]
 level = "Info"
@@ -67,9 +51,5 @@ pattern = "%(time) [%(thread_id)] %(log_level:<9) %(logger:<8) %(message)"
 [log_service.net]
 level = "Warn"
 to_console = false
-max_file_size_bytes = 67108864     # 64 MiB
+max_file_size_bytes = 67108864
 max_backup_files = 5
-
-[log_service.monitor]
-level = "Debug"
-to_rotating_file = false

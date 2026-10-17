@@ -1,34 +1,23 @@
-#define QUARK_LOG_COMPONENT "quark.log"
-
 #include "quark/QuarkLog.h"
 
-// #include "detail/InternalLog.h"
 #include "quark/QuarkConfig.h"
 #include "quark/QuarkError.h"
 
 #include "quill/Backend.h"
-#include "quill/Frontend.h"
 #include "quill/sinks/ConsoleSink.h"
 #include "quill/sinks/NullSink.h"
 #include "quill/sinks/RotatingFileSink.h"
 
 #include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <cstdio>
-#include <ctime>
 #include <limits>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <utility>
 
-#include <sys/syscall.h>
-#include <unistd.h>
+static_assert(quill::VersionMajor == 13 && quill::VersionMinor == 0 && quill::VersionPatch == 0,
+              "quark and every module of the process must use the same quill version, see QUARK_QUILL_VERSION");
 
 QUARK_BEGIN_NAMESPACE
-
-QUARK_API quark::Logger* quark_root_logger = nullptr;
 
 namespace {
 
@@ -39,16 +28,12 @@ constexpr const char* kConsoleSinkName{"quark_console"};
 constexpr const char* kNullSinkName{"quark_null"};
 constexpr const char* kBackendThreadName{"QuarkLogBackend"};
 
-enum class State : uint8_t { Uninitialized, Running, Stopped };
-
 struct LogContext {
     std::mutex mtx;
-    std::atomic<State> state{State::Uninitialized};
-    // Written by init_log() under mtx before state becomes Running (release), never modified
-    // afterwards: readers that observe Running may use them without the lock.
-    QueueType queue_type{QueueType::BoundedDropping};
-    Logger root;
-    std::map<std::string, Logger, std::less<>> loggers;
+    bool initialized{false};
+    LogConfig config;
+    quill::ManualBackendWorker* manual_worker{nullptr};
+    bool poller_created{false};
 };
 
 // Leaked on purpose so loggers stay usable from static destructors.
@@ -57,52 +42,11 @@ LogContext& context() {
     return *ctx;
 }
 
-constexpr quill::LogLevel to_quill_log_level(LogLevel level) noexcept {
-    switch (level) {
-        case LogLevel::Debug: return quill::LogLevel::Debug;
-        case LogLevel::Info:  return quill::LogLevel::Info;
-        case LogLevel::Warn:  return quill::LogLevel::Warning;
-        case LogLevel::Error: return quill::LogLevel::Error;
-        case LogLevel::Off:   return quill::LogLevel::None;
-    }
-    return quill::LogLevel::Info;
-}
-
-constexpr LogLevel from_quill_level(quill::LogLevel level) noexcept {
-    if (level == quill::LogLevel::None) return LogLevel::Off;
-    if (level <= quill::LogLevel::Debug) return LogLevel::Debug;
-    if (level <= quill::LogLevel::Notice) return LogLevel::Info;
-    if (level == quill::LogLevel::Warning) return LogLevel::Warn;
-    return LogLevel::Error;
-}
-
-constexpr std::string_view to_string(QueueType type) noexcept {
-    switch (type) {
-        case QueueType::UnboundedBlocking: return "UnboundedBlocking";
-        case QueueType::UnboundedDropping: return "UnboundedDropping";
-        case QueueType::BoundedBlocking:   return "BoundedBlocking";
-        case QueueType::BoundedDropping:   return "BoundedDropping";
-    }
-    return "Unknown";
-}
-
-std::vector<uint16_t> to_cpu_affinity(const std::vector<int64_t>& cpus) {
-    std::vector<uint16_t> result;
-    result.reserve(cpus.size());
-    for (int64_t cpu : cpus) {
-        if (cpu < 0 || cpu > std::numeric_limits<uint16_t>::max()) {
-            QUARK_THROW(QuarkError{"LogOptions::cpu_affinity contains an invalid cpu id: " + std::to_string(cpu)});
-        }
-        result.push_back(static_cast<uint16_t>(cpu));
-    }
-    return result;
-}
-
-std::vector<std::shared_ptr<quill::Sink>> make_sinks(std::string_view name, const LogOptions& options) {
+std::vector<std::shared_ptr<quill::Sink>> make_sinks(const std::string& name, const LogOptions& options) {
     std::vector<std::shared_ptr<quill::Sink>> sinks;
 
     if (options.to_console) {
-        sinks.push_back(quill::Frontend::create_or_get_sink<quill::ConsoleSink>(kConsoleSinkName));
+        sinks.push_back(Frontend::create_or_get_sink<quill::ConsoleSink>(kConsoleSinkName));
     }
 
     if (options.to_rotating_file) {
@@ -119,16 +63,29 @@ std::vector<std::shared_ptr<quill::Sink>> make_sinks(std::string_view name, cons
         if (!options.daily_rotation_time.empty()) {
             cfg.set_rotation_time_daily(options.daily_rotation_time);
         }
-        const std::string filename =
-            options.filename.empty() ? "logs/" + std::string{name} + ".log" : options.filename;
-        sinks.push_back(quill::Frontend::create_or_get_sink<quill::RotatingFileSink>(filename, cfg));
+        const std::string filename = options.filename.empty() ? "logs/" + name + ".log" : options.filename;
+        sinks.push_back(Frontend::create_or_get_sink<quill::RotatingFileSink>(filename, cfg));
     }
 
-    // Both sinks disabled: keep a valid logger that discards everything.
     if (sinks.empty()) {
-        sinks.push_back(quill::Frontend::create_or_get_sink<quill::NullSink>(kNullSinkName));
+        sinks.push_back(Frontend::create_or_get_sink<quill::NullSink>(kNullSinkName));
     }
     return sinks;
+}
+
+// Caller holds ctx.mtx.
+Logger* create_logger_locked(LogContext& ctx, const std::string& name) {
+    if (Logger* logger = Frontend::get_logger(name)) {
+        return logger;
+    }
+    const auto it = ctx.config.loggers.find(name);
+    const LogOptions options = it != ctx.config.loggers.end() ? it->second : LogOptions{};
+
+    const quill::PatternFormatterOptions pattern{
+        options.pattern.empty() ? std::string{kDefaultPattern} : options.pattern, kDefaultTimestampPattern};
+    Logger* logger = Frontend::create_or_get_logger(name, make_sinks(name, options), pattern);
+    logger->set_log_level(options.level);
+    return logger;
 }
 
 template <typename T>
@@ -138,13 +95,6 @@ void assign(const QuarkConfig& cfg, const std::string& path, T& out) {
     }
 }
 
-}  // namespace
-
-// -----------------------------------------------------------------------------
-// LogOptions / LogConfig
-// -----------------------------------------------------------------------------
-namespace {
-
 std::string join_path(std::string_view section, std::string_view field) {
     std::string path{section};
     path += '.';
@@ -152,24 +102,11 @@ std::string join_path(std::string_view section, std::string_view field) {
     return path;
 }
 
-// Keys of a [log.<name>] table, and of the [log] table.
-constexpr std::string_view kLoggerKeys[] = {"to_console", "to_rotating_file", "level", "pattern", "filename",
-                                            "max_file_size_bytes", "max_backup_files", "daily_rotation_time"};
-constexpr std::string_view kGlobalKeys[] = {"queue_type", "cpu_affinity", "backend_sleep_ns", "backend_yield_when_idle"};
-
-template <std::size_t N>
-std::string_view find_present_key(const QuarkConfig& cfg, std::string_view section,
-                                  const std::string_view (&keys)[N]) {
-    for (std::string_view key : keys) {
-        if (cfg[join_path(section, key)].has_value()) {
-            return key;
-        }
-    }
-    return {};
-}
-
 }  // namespace
 
+// -----------------------------------------------------------------------------
+// Config
+// -----------------------------------------------------------------------------
 LogOptions LogOptions::load_from_config(const QuarkConfig& cfg, std::string_view section) {
     const auto key = [section](std::string_view field) { return join_path(section, field); };
 
@@ -177,7 +114,7 @@ LogOptions LogOptions::load_from_config(const QuarkConfig& cfg, std::string_view
     assign(cfg, key("to_console"), options.to_console);
     assign(cfg, key("to_rotating_file"), options.to_rotating_file);
     if (auto level = cfg.get<std::string>(key("level"))) {
-        options.level = parse_log_level(*level);
+        options.level = quill::loglevel_from_string(*level);
     }
     assign(cfg, key("pattern"), options.pattern);
     assign(cfg, key("filename"), options.filename);
@@ -188,89 +125,29 @@ LogOptions LogOptions::load_from_config(const QuarkConfig& cfg, std::string_view
 }
 
 LogConfig LogConfig::load_from_config(const QuarkConfig& cfg, std::string_view section) {
+    const auto key = [section](std::string_view field) { return join_path(section, field); };
+
     LogConfig config;
-    if (auto queue_type = cfg.get<std::string>(join_path(section, "queue_type"))) {
-        config.global.queue_type = parse_queue_type(*queue_type);
-    }
-    if (auto sleep_ns = cfg.get<int64_t>(join_path(section, "backend_sleep_ns"))) {
-        config.global.backend_sleep_duration = std::chrono::nanoseconds{std::max<int64_t>(*sleep_ns, 0)};
-    }
-    assign(cfg, join_path(section, "backend_yield_when_idle"), config.global.backend_yield_when_idle);
-    if (auto cpus = cfg.get<QuarkConfigArray>(join_path(section, "cpu_affinity"))) {
-        config.global.cpu_affinity.clear();
+    assign(cfg, key("manual_backend"), config.backend.manual_backend);
+    if (auto cpus = cfg.get<QuarkConfigArray>(key("cpu_affinity"))) {
         for (const auto& cpu : *cpus) {
-            if (auto id = cpu.get<int64_t>()) {
-                config.global.cpu_affinity.push_back(*id);
+            const auto id = cpu.get<int64_t>();
+            if (!id || *id < 0 || *id > std::numeric_limits<uint16_t>::max()) {
+                QUARK_THROW(QuarkError{key("cpu_affinity") + " must contain cpu ids"});
             }
+            config.backend.cpu_affinity.push_back(static_cast<uint16_t>(*id));
         }
     }
-    if (auto key = find_present_key(cfg, section, kLoggerKeys); !key.empty()) {
-        QUARK_LOG_WARN("[{}] {} ignored: per-logger options belong in a [{}.<logger name>] table", section, key,
-                       section);
+    if (auto sleep_ns = cfg.get<int64_t>(key("backend_sleep_ns"))) {
+        config.backend.sleep_duration = std::chrono::nanoseconds{std::max<int64_t>(*sleep_ns, 0)};
     }
+    assign(cfg, key("backend_yield_when_idle"), config.backend.yield_when_idle);
 
     for (std::string& name : cfg.table_names(section)) {
-        const std::string logger_section = join_path(section, name);
-        if (auto key = find_present_key(cfg, logger_section, kGlobalKeys); !key.empty()) {
-            QUARK_LOG_WARN("[{}] {} ignored: it is a global option, set it in [{}]", logger_section, key, section);
-        }
-        config.loggers.emplace(std::move(name), LogOptions::load_from_config(cfg, logger_section));
+        LogOptions options = LogOptions::load_from_config(cfg, join_path(section, name));
+        config.loggers.emplace(std::move(name), std::move(options));
     }
     return config;
-}
-
-// -----------------------------------------------------------------------------
-// Logger
-// -----------------------------------------------------------------------------
-namespace detail {
-
-struct LoggerFactory {
-    // Caller holds ctx.mtx.
-    static Logger create_locked(LogContext& ctx, const std::string& name, const LogOptions& options) {
-        if (auto it = ctx.loggers.find(name); it != ctx.loggers.end()) {
-            return it->second;
-        }
-
-        auto sinks = make_sinks(name, options);
-        const quill::PatternFormatterOptions pattern{
-            options.pattern.empty() ? std::string{kDefaultPattern} : options.pattern, kDefaultTimestampPattern};
-
-        quill::detail::LoggerBase* base = visit_queue_type(ctx.queue_type, [&](auto type) -> quill::detail::LoggerBase* {
-            return quill::FrontendImpl<FrontendOptions<decltype(type)::value>>::create_or_get_logger(
-                name, std::move(sinks), pattern);
-        });
-        base->set_log_level(to_quill_log_level(options.level));
-
-        Logger logger{base, ctx.queue_type};
-        ctx.loggers.emplace(name, logger);
-        return logger;
-    }
-};
-
-}  // namespace detail
-
-std::string_view Logger::name() const noexcept {
-    return logger_ ? std::string_view{logger_->get_logger_name()} : std::string_view{};
-}
-
-LogLevel Logger::level() const noexcept {
-    return logger_ ? from_quill_level(logger_->get_log_level()) : LogLevel::Info;
-}
-
-void Logger::set_level(LogLevel level) noexcept {
-    if (!logger_) {
-        return;
-    }
-    logger_->set_log_level(to_quill_log_level(level));
-}
-
-void Logger::flush() const {
-    if (!logger_ || context().state.load(std::memory_order_acquire) != State::Running) {
-        return;
-    }
-    detail::visit_queue_type(queue_type_, [this](auto type) {
-        static_cast<detail::LoggerImpl<decltype(type)::value>*>(logger_)->flush_log();
-    });
 }
 
 // -----------------------------------------------------------------------------
@@ -278,45 +155,50 @@ void Logger::flush() const {
 // -----------------------------------------------------------------------------
 bool init_log(const LogConfig& config) {
     auto& ctx = context();
-    std::lock_guard lock{ctx.mtx};
-    if (ctx.state.load(std::memory_order_relaxed) != State::Uninitialized) {
-        QUARK_LOG_WARN("init_log() ignored: logging was already initialized");
-        return false;
-    }
+    bool backend_taken = false;
+    std::vector<std::string> created_early;
+    {
+        std::lock_guard lock{ctx.mtx};
+        if (ctx.initialized) {
+            return false;
+        }
 
-    quill::BackendOptions backend_options;
-    backend_options.thread_name = kBackendThreadName;
-    backend_options.cpu_affinity = to_cpu_affinity(config.global.cpu_affinity);
-    backend_options.sleep_duration = config.global.backend_sleep_duration;
-    backend_options.enable_yield_when_idle = config.global.backend_yield_when_idle;
-    quill::Backend::start(backend_options);
-    ctx.queue_type = config.global.queue_type;
+        backend_taken = quill::Backend::is_running();
+        if (config.backend.manual_backend) {
+            if (backend_taken) {
+                QUARK_THROW(QuarkError{"init_log(): manual_backend, but the quill backend is already running"});
+            }
+            ctx.manual_worker = quill::Backend::acquire_manual_backend_worker();
+        } else {
+            quill::BackendOptions options;
+            options.thread_name = kBackendThreadName;
+            options.cpu_affinity = config.backend.cpu_affinity;
+            options.sleep_duration = config.backend.sleep_duration;
+            options.enable_yield_when_idle = config.backend.yield_when_idle;
+            quill::Backend::start(options);
+        }
+        ctx.initialized = true;
+        ctx.config = config;
 
-    // quark's own logger first, with defaults unless [log.quark] is configured.
-    const std::string quark_name{kQuarkLoggerName};
-    const auto quark_it = config.loggers.find(quark_name);
-    const LogOptions quark_options = quark_it != config.loggers.end() ? quark_it->second : LogOptions{};
-    ctx.root = detail::LoggerFactory::create_locked(ctx, quark_name, quark_options);
-    quark_root_logger = &ctx.root;
-
-    std::string names{quark_name};
-    for (const auto& [name, options] : config.loggers) {
-        if (name != quark_name) {
-            (void)detail::LoggerFactory::create_locked(ctx, name, options);
-            names += ", " + name;
+        for (const auto& [name, options] : config.loggers) {
+            if (Logger* logger = Frontend::get_logger(name)) {
+                logger->set_log_level(options.level);
+                created_early.push_back(name);
+            } else {
+                (void)create_logger_locked(ctx, name);
+            }
         }
     }
-    // Publishes queue_type, root and loggers to lock-free readers.
-    ctx.state.store(State::Running, std::memory_order_release);
 
-    std::string cpus;
-    for (int64_t cpu : config.global.cpu_affinity) {
-        cpus += (cpus.empty() ? "" : ", ") + std::to_string(cpu);
+    // Logged outside the lock, quark's logger may still have to be created.
+    if (backend_taken) {
+        QUARK_LOG_WARN("init_log(): the quill backend was already started elsewhere, [log] backend options ignored");
     }
-    QUARK_LOG_INFO("quark logging initialized: queue_type={} initial_queue_capacity={} huge_pages={} "
-                   "backend_sleep_ns={} cpu_affinity=[{}] loggers=[{}]",
-                   to_string(ctx.queue_type), kLogInitialQueueCapacity, kLogHugePages,
-                   config.global.backend_sleep_duration.count(), cpus, names);
+    for (const auto& name : created_early) {
+        QUARK_LOG_WARN("init_log(): logger {} was created before init_log(), only its level is applied", name);
+    }
+    QUARK_LOG_INFO("quark logging initialized: manual_backend={} loggers={}", config.backend.manual_backend,
+                   config.loggers.size());
     return true;
 }
 
@@ -324,69 +206,56 @@ bool init_log(const QuarkConfig& cfg, std::string_view section) {
     return init_log(LogConfig::load_from_config(cfg, section));
 }
 
-void preallocate_log() noexcept {
-    auto& ctx = context();
-    if (ctx.state.load(std::memory_order_acquire) != State::Running) {
-        return;
-    }
-    detail::visit_queue_type(ctx.queue_type, [](auto type) {
-        quill::FrontendImpl<detail::FrontendOptions<decltype(type)::value>>::preallocate();
-    });
-}
-
 void shutdown_log() noexcept {
     auto& ctx = context();
     std::lock_guard lock{ctx.mtx};
-    if (ctx.state.exchange(State::Stopped, std::memory_order_acq_rel) == State::Running) {
-        // quark's own records go to stderr from now on.
-        // Drains every frontend queue before the backend thread exits.
+    if (ctx.initialized && !ctx.manual_worker) {
         quill::Backend::stop();
     }
 }
 
-Logger get_logger(std::string_view name) noexcept {
+Logger* get_logger(std::string_view name) {
+    const std::string key{name};
+    if (Logger* logger = Frontend::get_logger(key)) {
+        return logger;
+    }
     auto& ctx = context();
-    if (ctx.state.load(std::memory_order_acquire) != State::Running) {
-        return {};
-    }
-    if (auto it = ctx.loggers.find(name); it != ctx.loggers.end()) {
-        return it->second;
-    }
-    QUARK_LOG_WARN("get_logger({}): no such logger, declare it in the logging config", name);
-    return {};
+    std::lock_guard lock{ctx.mtx};
+    return create_logger_locked(ctx, key);
+}
+
+Logger* detail::quark_logger() {
+    static Logger* logger = get_logger(kQuarkLoggerName);
+    return logger;
 }
 
 // -----------------------------------------------------------------------------
-// quark-internal logging, see detail/InternalLog.h
+// LogPoller
 // -----------------------------------------------------------------------------
-// Logger detail::quark_logger() noexcept {
-//     auto& ctx = context();
-//     return ctx.state.load(std::memory_order_acquire) == State::Running ? ctx.root : Logger{};
-// }
+LogPoller::LogPoller() {
+    auto& ctx = context();
+    std::lock_guard lock{ctx.mtx};
+    if (!ctx.manual_worker || ctx.poller_created) {
+        QUARK_THROW(QuarkError{"LogPoller needs init_log() with manual_backend, and only one LogPoller may exist"});
+    }
+    // poll_once() requires a non-sleeping, non-yielding backend.
+    quill::BackendOptions options;
+    options.sleep_duration = std::chrono::nanoseconds{0};
+    options.enable_yield_when_idle = false;
+    ctx.manual_worker->init(options);
+    ctx.poller_created = true;
+}
 
-// void detail::write_stderr(LogLevel level, const char* component, const char* file, uint32_t line,
-//                           std::string_view message) noexcept {
-//     static constexpr char kLevelChar[] = {'D', 'I', 'W', 'E', 'O'};
-//     thread_local const auto tid = static_cast<unsigned long long>(::syscall(SYS_gettid));
+LogPoller::~LogPoller() {
+    context().manual_worker->shutdown();
+}
 
-//     const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
-//     const std::time_t secs = std::chrono::duration_cast<std::chrono::seconds>(since_epoch).count();
-//     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(since_epoch).count() % 1'000'000;
-//     std::tm tm{};
-//     ::localtime_r(&secs, &tm);
+void LogPoller::poll_once() {
+    context().manual_worker->poll_one();
+}
 
-//     std::string_view filename{file};
-//     if (const auto pos = filename.find_last_of('/'); pos != std::string_view::npos) {
-//         filename.remove_prefix(pos + 1);
-//     }
-
-//     // `W20261008 12:34:56.789012 4242 QuarkConfig.cpp:42] [quark.config] message`. One fprintf per
-//     // record: stderr is unbuffered, so lines from different threads don't interleave.
-//     std::fprintf(stderr, "%c%04d%02d%02d %02d:%02d:%02d.%06lld %llu %.*s:%u] [%s] %.*s\n",
-//                  kLevelChar[static_cast<uint8_t>(level) % sizeof(kLevelChar)], tm.tm_year + 1900, tm.tm_mon + 1,
-//                  tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<long long>(micros), tid,
-//                  static_cast<int>(filename.size()), filename.data(), line, component,
-//                  static_cast<int>(message.size()), message.data());
-// }
+void LogPoller::poll_for(std::chrono::microseconds timeout) {
+    context().manual_worker->poll(timeout);
+}
 
 QUARK_END_NAMESPACE
