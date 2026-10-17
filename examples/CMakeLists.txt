@@ -11,7 +11,7 @@ foreach (example_target ${EXAMPLE_TARGETS})
     set(source_file "${source_name}.cpp")
 
     add_executable(${example_target} ${source_file})
-    set_common_compile_options(${example_target})
+    quark_set_common_compile_options(${example_target})
 
     target_link_libraries(${example_target} quark::quark)
 endforeach ()

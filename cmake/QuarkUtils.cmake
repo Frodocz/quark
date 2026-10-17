@@ -26,7 +26,7 @@ function(quark_extract_version)
 endfunction()
 
 # Define the function to set common compile options
-function(set_common_compile_options target_name)
+function(quark_set_common_compile_options target_name)
     cmake_parse_arguments(COMPILE_OPTIONS "" "VISIBILITY" "" ${ARGN})
 
     # Set default visibility to PRIVATE if not provided

@@ -23,7 +23,7 @@ namespace {
 
 constexpr const char* kDefaultPattern{
     "%(time) [%(thread_id)] %(short_source_location:<20) %(log_level:<8) %(logger:<6) %(message)"};
-constexpr const char* kDefaultTimestampPattern{"%Y-%m-%d %H:%M:%S.%Qus"};
+constexpr const char* kDefaultTimestampPattern{"%Y-%m-%d %H:%M:%S.%Qns"};
 constexpr const char* kConsoleSinkName{"quark_console"};
 constexpr const char* kNullSinkName{"quark_null"};
 constexpr const char* kBackendThreadName{"QuarkLogBackend"};

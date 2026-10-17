@@ -154,6 +154,11 @@ endif ()
 
 FetchContent_MakeAvailable(absl simdjson tomlplusplus)
 
+# JsonParser.h pulls simdjson.h into user code, mark it as a system header so its warnings
+# (e.g. -Wredundant-decls) don't break targets built with -Werror
+get_target_property(SIMDJSON_INCLUDE_DIRS simdjson INTERFACE_INCLUDE_DIRECTORIES)
+set_target_properties(simdjson PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${SIMDJSON_INCLUDE_DIRS}")
+
 # Reuse the quill of the parent project or of the system, fetch it otherwise
 if (NOT TARGET quill::quill)
     find_package(quill ${QUARK_QUILL_VERSION} EXACT CONFIG QUIET)
@@ -209,7 +214,7 @@ if (QUARK_SANITIZE_THREAD)
 endif ()
 
 # Append extra options for coverage
-if (QUARKCODE_COVERAGE)
+if (QUARK_CODE_COVERAGE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -fno-omit-frame-pointer -g -fprofile-arcs -ftest-coverage")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-arcs -ftest-coverage")
 endif ()
@@ -290,8 +295,10 @@ target_include_directories(${TARGET_NAME}
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# PUBLIC: QUARK_THROW in quark's inline headers (e.g. JsonParser.h) must abort rather than throw in user code.
+# quill is header-only, so QUILL_NO_EXCEPTIONS works whether quill was fetched, found or given by a parent.
 if (QUARK_NO_EXCEPTIONS)
-    target_compile_definitions(${TARGET_NAME} PRIVATE QUARK_NO_EXCEPTIONS)
+    target_compile_definitions(${TARGET_NAME} PUBLIC QUARK_NO_EXCEPTIONS QUILL_NO_EXCEPTIONS)
     target_compile_options(${TARGET_NAME} PRIVATE
             $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-fno-exceptions>)
 endif ()
@@ -368,6 +375,9 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     set(QUARK_PKGCONFIG_CFLAGS "")
     if (NOT QUARK_ENABLE_LOGGER)
         set(QUARK_PKGCONFIG_CFLAGS " -DQUARK_DISABLE_INTERNAL_LOG")
+    endif ()
+    if (QUARK_NO_EXCEPTIONS)
+        string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_NO_EXCEPTIONS -DQUILL_NO_EXCEPTIONS")
     endif ()
 
     # absl is PRIVATE, but a static quark still needs it on the user's link line, and pkg-config only
