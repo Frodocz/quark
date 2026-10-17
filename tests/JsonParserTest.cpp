@@ -357,4 +357,100 @@ TEST(JsonParser, RejectsCapacityAboveSimdjsonMax) {
 #endif
 }
 
+TEST(JsonParser, TestParseGeneral) {
+    // clang-format off
+    std::string input = R"(
+        {
+        "status": "ok",
+        "nodes": [ 
+            {
+                "source": "spot-web",
+                "price": "0.338",
+                "fee": 0.06
+            }
+        ],
+        "data": 
+            {
+                "symbol": "polyusdt",
+                "fee-currency": "poly",
+                "source": "spot-web",
+                "order-id": 345487249132375,
+                "price": "0.338",
+                "created-at": 1629443051839,
+                "role": "taker",
+                "match-id": "5014",
+                "filled-amount": "147.928994082840236",
+                "filled-fees": "0",
+                "filled-points": "0.1",
+                "fee-deduct-currency": "hbpoint",
+                "fee-deduct-state": "done",
+                "trade-id": 1085,
+                "id": 313288753120940,
+                "type": "buy-market",
+                "fee": 0.06
+            }
+        
+        }
+    )";
+
+    // clang-format on
+    JsonParser parser;
+    simdjson::ondemand::document doc;
+    EXPECT_EQ(parser.parse_in_place(input).get(doc), simdjson::INSUFFICIENT_PADDING);
+
+    input.reserve(input.size() + JsonParser::kPadding);
+    EXPECT_EQ(parser.parse_in_place(input).get(doc), simdjson::SUCCESS);
+
+    // 1. check parse string_view
+    std::string_view data_sv;
+    EXPECT_EQ(doc["error_code"].get(data_sv), simdjson::NO_SUCH_FIELD);
+    EXPECT_TRUE(data_sv.empty());
+
+    EXPECT_EQ(doc["status"].get(data_sv), simdjson::SUCCESS);
+    EXPECT_EQ(data_sv, "ok");
+
+    // 2. test integer
+    simdjson::ondemand::object data;
+    EXPECT_EQ(doc["data"].get(data), simdjson::SUCCESS);
+    int64_t num_i{0};
+    EXPECT_EQ(data["anystr"].get(num_i), simdjson::NO_SUCH_FIELD);
+    EXPECT_EQ(num_i, 0);
+    EXPECT_EQ(data["match-id"].get(num_i), simdjson::INCORRECT_TYPE);
+    EXPECT_EQ(data["match-id"]->get_int64_in_string().get(num_i), simdjson::SUCCESS);
+    EXPECT_EQ(num_i, 5014);
+
+    EXPECT_EQ(data["id"].get(num_i), simdjson::SUCCESS);
+    EXPECT_EQ(num_i, 313288753120940);
+
+    // 3. test double
+    double num_d{0.0};
+    EXPECT_EQ(data["anystr"].get(num_d), simdjson::NO_SUCH_FIELD);
+    EXPECT_EQ(num_d, 0);
+    EXPECT_EQ(data["filled-amount"].get(num_d), simdjson::INCORRECT_TYPE);
+    EXPECT_EQ(data["filled-amount"]->get_double_in_string().get(num_d), simdjson::SUCCESS);
+    EXPECT_NEAR(num_d, 147.928994082840236, 1e-10);
+
+    EXPECT_EQ(data["fee"].get(num_d), simdjson::SUCCESS);
+    EXPECT_NEAR(num_d, 0.06, 1e-10);
+
+    // 4. test array
+    auto nodes = doc["nodes"];
+    EXPECT_TRUE(!nodes->is_scalar());
+    for (auto node : nodes->get_array()) {
+        std::string_view source;
+        EXPECT_EQ(node["source"].get(source), simdjson::SUCCESS);
+        EXPECT_EQ(source, "spot-web");
+
+        std::string_view price_str;
+        EXPECT_EQ(node["price"]->get(price_str), simdjson::SUCCESS);
+        EXPECT_EQ(price_str, "0.338");
+        double d;
+        EXPECT_EQ(node["price"].get(d), simdjson::INCORRECT_TYPE);
+        EXPECT_EQ(node["price"]->get_double_in_string().get(d), simdjson::SUCCESS);
+        // EXPECT_NEAR(d, 0.338, 1e-10);
+        EXPECT_EQ(node["fee"]->get(d), simdjson::SUCCESS);
+        EXPECT_NEAR(d, 0.06, 1e-10);
+    }
+}
+
 } // namespace
