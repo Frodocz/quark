@@ -35,3 +35,4 @@ function(quark_add_test test_target source_file)
 endfunction()
 
 quark_add_test(quark_test_json_parser JsonParserTest.cpp)
+quark_add_test(quark_test_trading_day TradingDayTest.cpp)
