@@ -239,6 +239,9 @@ set(HEADER_FILES
         include/quark/QuarkFormat.h
         include/quark/QuarkLog.h
 
+        include/quark/math/DoubleOps.h
+        include/quark/math/ScaleInt.h
+
         include/quark/utils/DateTime.h
         include/quark/utils/FullDuplexShm.h
         include/quark/utils/JsonParser.h

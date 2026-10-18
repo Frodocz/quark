@@ -18,7 +18,7 @@ public:
         bool lock = true;     // use mlock to lock the address into the memory
         bool create = true;   // create if the file doesn't exist
         mode_t mode = 0644;   // access mode: owner rw-, group r--, others r--
-        std::size_t size = 0;      // use a non-zero value to truncate the file 
+        std::size_t size = 0; // use a non-zero value to truncate the file
     
         std::string to_string() const;
     };

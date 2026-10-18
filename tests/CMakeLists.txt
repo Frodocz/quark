@@ -34,5 +34,10 @@ function(quark_add_test test_target source_file)
     gtest_discover_tests(${test_target} DISCOVERY_MODE PRE_TEST)
 endfunction()
 
-quark_add_test(quark_test_json_parser JsonParserTest.cpp)
-quark_add_test(quark_test_trading_day TradingDayTest.cpp)
+# maths
+quark_add_test(quark_test_double_ops math/DoubleOpsTest.cpp)
+quark_add_test(quark_test_scale_int math/ScaleIntTest.cpp)
+
+# utils
+quark_add_test(quark_test_json_parser utils/JsonParserTest.cpp)
+quark_add_test(quark_test_trading_day utils/TradingDayTest.cpp)

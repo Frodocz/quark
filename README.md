@@ -44,10 +44,11 @@ and lock-free queues for quickly start some latency-sensitive applications such 
 ## Features
 | Modules             | Descriptions                                                                                                   |
 |---------------------|----------------------------------------------------------------------------------------------------------------|
-| **Logging**         | Wrapping [`Quill`](https://github.com/odygrd/quill/blob/master/LICENSE), one of the fastest C++ logging module |
 | **Configuration**   | `TOML` used for personal preference, wrapping [toml++](https://github.com/marzer/tomlplusplus)                 |
 | **Fixed-Point**     | Fixed-point numbers are needed in financial systems to prevent tiny rounding errors from binary math           |
 | **Lock-Free Queues**| Lock-Free queues to for high-performance, low-latency and predictable concurrent systems                       |
+| **Logging**         | Wrapping [`Quill`](https://github.com/odygrd/quill), one of the fastest C++ logging module                     |
+| **Tsc closk**       | Wrapping [`tscns`](https://github.com/odygrd/tscns), a low overhead nanosecond clock based on x86 TSC          |
 
 ---
 
@@ -140,4 +141,6 @@ Quark depends on third party libraries with separate copyright notices and licen
 Your use of the source code for these subcomponents is subject to the terms and conditions of the following licenses.
 
 - ([MIT License](https://opensource.org/licenses/MIT)) [quill](https://github.com/odygrd/quill/blob/master/LICENSE)
-- ([MIT License](https://opensource.org/licenses/MIT)) [toml++](https://github.com/marzer/tomlplusplus)
+- ([MIT License](https://opensource.org/licenses/MIT)) [SPSC_Queue](https://github.com/MengRao/SPSC_Queue/blob/master/LICENSE)
+- ([MIT License](https://opensource.org/licenses/MIT)) [toml++](https://github.com/marzer/tomlplusplus/blob/master/LICENSE)
+- ([MIT License](https://opensource.org/licenses/MIT)) [tscns](https://github.com/MengRao/tscns/blob/master/LICENSE)

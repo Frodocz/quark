@@ -32,7 +32,7 @@ static_assert(kCanParseCopy<const char (&)[3]>);
 static_assert(kCanParseCopy<std::string>);
 
 // Line 0 is the REST depth snapshot, the following lines are the depthUpdate stream messages
-constexpr const char* kDepthFile = QUARK_TEST_DATA_DIR "/Binance_LinearSwap_BTCUSDT_depth.json";
+constexpr const char* kDepthFile = QUARK_TEST_DATA_DIR "/utils/Binance_LinearSwap_BTCUSDT_depth.json";
 constexpr size_t kDepthLines = 622;
 constexpr size_t kSnapshotLevels = 1000;
 

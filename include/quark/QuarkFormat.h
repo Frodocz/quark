@@ -22,6 +22,7 @@
 
     namespace quark::fmtlib {
         using fmtquill::format;
+        using fmtquill::format_int;
         using fmtquill::format_string;
         using fmtquill::format_to;
         using fmtquill::print; // fmt::print(std::ostream&, ...)
