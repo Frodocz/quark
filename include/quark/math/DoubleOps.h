@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quark/Attributes.h"
+#include "quark/math/MathOps.h"
 
 #include <concepts>
 #include <limits>
@@ -18,7 +19,7 @@
 //   is_zero(x)             |x| <= tol.abs      (tol.rel is meaningless against zero)
 //
 // Properties:
-//   * constexpr and noexcept; no <cmath> needed (std::abs is only constexpr in C++23)
+//   * constexpr and noexcept; built on the helpers in MathOps.h, no <cmath> needed
 //   * never uses == or != on floating point, so it builds under -Wfloat-equal -Werror
 //   * every predicate is false if either argument is NaN
 //   * infinities compare equal only to the same infinity, never to a finite value
@@ -33,27 +34,6 @@ QUARK_BEGIN_NAMESPACE
 
 namespace math {
 
-namespace detail {
- 
-template <std::floating_point T>
-[[nodiscard]] constexpr T abs(T x) noexcept {
-    return x < T{0} ? -x : x;
-}
- 
-template <std::floating_point T>
-[[nodiscard]] constexpr T max(T a, T b) noexcept {
-    return a < b ? b : a;
-}
-
-// False for NaN and +-infinity. Uses only ordering comparisons (no ==, !=), so it is clean
-// under -Wfloat-equal, and no arithmetic on inf/NaN, so it is valid in constant evaluation.
-template <std::floating_point T>
-[[nodiscard]] constexpr bool is_finite(T x) noexcept {
-    return x >= std::numeric_limits<T>::lowest() && x <= std::numeric_limits<T>::max();
-}
- 
-}  // namespace detail
-
 template <std::floating_point T>
 struct Tolerance {
     // Relative tolerance: a few ulps by default.
@@ -65,24 +45,24 @@ struct Tolerance {
 
 template <std::floating_point T>
 [[nodiscard]] constexpr bool is_zero(T x, Tolerance<T> tol = {}) noexcept {
-    return detail::abs(x) <= tol.abs;
+    return math::abs(x) <= tol.abs;
 }
 
 template <std::floating_point T>
 [[nodiscard]] constexpr bool equals(T a, T b, Tolerance<T> tol = {}) noexcept {
-    if (!detail::is_finite(a) || !detail::is_finite(b)) {
+    if (!math::is_finite(a) || !math::is_finite(b)) {
         // NaN, or at least one infinity: equal only if both are the same infinity.
         // (NaN fails every ordering comparison, so it is never equal to anything.)
         constexpr T kMax = std::numeric_limits<T>::max();
         return (a > kMax && b > kMax) || (a < -kMax && b < -kMax);
     }
     // Never compute a - b directly: it can overflow (e.g. 1e308 - -1e308), which is
-    // harmless at run time but not a constant expression. Work on magnitudes instead.
-    const T abs_a = detail::abs(a);
-    const T abs_b = detail::abs(b);
-    const T hi = detail::max(abs_a, abs_b);
-    const T lo = abs_a < abs_b ? abs_a : abs_b;
-    const T threshold = detail::max(tol.abs, tol.rel * hi);
+    // harmless at run time but not a constant expression. Work on magnitudes instead.round_to_tick_raw
+    const T abs_a = math::abs(a);
+    const T abs_b = math::abs(b);
+    const T hi = math::max(abs_a, abs_b);
+    const T lo = math::min(abs_a, abs_b);
+    const T threshold = math::max(tol.abs, tol.rel * hi);
     if ((a < T{0}) == (b < T{0})) {
         return hi - lo <= threshold;  // same sign (+-0 included): |a - b| == ||a| - |b||
     }

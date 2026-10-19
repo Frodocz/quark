@@ -240,6 +240,7 @@ set(HEADER_FILES
         include/quark/QuarkLog.h
 
         include/quark/math/DoubleOps.h
+        include/quark/math/MathOps.h
         include/quark/math/ScaleInt.h
 
         include/quark/utils/DateTime.h

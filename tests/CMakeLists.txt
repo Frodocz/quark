@@ -36,6 +36,7 @@ endfunction()
 
 # maths
 quark_add_test(quark_test_double_ops math/DoubleOpsTest.cpp)
+quark_add_test(quark_test_math_ops math/MathOpsTest.cpp)
 quark_add_test(quark_test_scale_int math/ScaleIntTest.cpp)
 
 # utils

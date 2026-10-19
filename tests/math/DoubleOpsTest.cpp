@@ -161,3 +161,17 @@ TEST_F(TestDoubleOps, DocumentedNonTransitivity) {
     EXPECT_TRUE(math::equals(b, c));
     EXPECT_FALSE(math::equals(a, c));
 }
+
+TEST_F(TestDoubleOps, Subnormals) {
+    constexpr double kDenormMin = std::numeric_limits<double>::denorm_min();
+    constexpr double kMinNormal = std::numeric_limits<double>::min();
+    EXPECT_FALSE(math::is_zero(kDenormMin));
+    EXPECT_TRUE(math::is_zero(kDenormMin, {.abs = kMinNormal}));
+    EXPECT_FALSE(math::equals(kDenormMin, 0.0));
+    EXPECT_FALSE(math::equals(kDenormMin, 2 * kDenormMin));  // relative tolerance is below 1 ulp here
+    EXPECT_TRUE(math::equals(kDenormMin, 2 * kDenormMin, {.abs = kMinNormal}));
+    EXPECT_TRUE(math::equals(kDenormMin, -kDenormMin, {.abs = kMinNormal}));
+    EXPECT_TRUE(math::greater(kDenormMin, 0.0));
+    EXPECT_TRUE(math::less_than(-kDenormMin, 0.0));
+    EXPECT_TRUE(math::equals(kMinNormal, std::nextafter(kMinNormal, 0.0), {.abs = kDenormMin}));
+}
