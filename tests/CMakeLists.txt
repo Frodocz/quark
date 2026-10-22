@@ -39,6 +39,10 @@ quark_add_test(quark_test_double_ops math/DoubleOpsTest.cpp)
 quark_add_test(quark_test_math_ops math/MathOpsTest.cpp)
 quark_add_test(quark_test_scale_int math/ScaleIntTest.cpp)
 
+# net
+quark_add_test(quark_test_rx_buf net/RxBufTest.cpp)
+quark_add_test(quark_test_tx_buf net/TxBufTest.cpp)
+
 # utils
 quark_add_test(quark_test_json_parser utils/JsonParserTest.cpp)
 quark_add_test(quark_test_trading_day utils/TradingDayTest.cpp)

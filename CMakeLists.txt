@@ -243,6 +243,10 @@ set(HEADER_FILES
         include/quark/math/MathOps.h
         include/quark/math/ScaleInt.h
 
+        include/quark/net/RxBuf.h
+        include/quark/net/TxBuf.h
+
+        include/quark/utils/CircularBuffer.h
         include/quark/utils/DateTime.h
         include/quark/utils/FullDuplexShm.h
         include/quark/utils/JsonParser.h
