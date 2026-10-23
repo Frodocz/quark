@@ -1,5 +1,6 @@
 #include "quark/utils/DateTime.h"
 #include "quark/utils/RdtscClock.h"
+#include "quark/utils/MemoryArena.h"
 #include "quark/utils/SimpleObjectPool.h"
 #include "gtest/gtest.h"
 
@@ -233,3 +234,35 @@ TEST_F(TestSimpleObjectPool, UseAfterFreeReportedUnderAsan) {
     EXPECT_DEATH({ volatile double q = o->qty; (void)q; }, "use-after-poison");
 }
 #endif
+
+TEST_F(TestSimpleObjectPool, ChunksFromArenaThenHeap) {
+    MemoryArena arena(64 * 1024, {.huge_pages = MemoryArena::HugePages::Never});
+    // 216-byte slots: the 100-slot prealloc and growth chunks of 50 fit ~300 slots in 64 KiB
+    SimpleObjectPool<Order> pool(100, 50, &arena);
+    std::vector<Order*> objs;
+    std::size_t in_arena = 0;
+    for (int i = 0; i < 1000; ++i) {
+        Order* o = pool.alloc();
+        o->account_id = static_cast<uint32_t>(i);
+        objs.push_back(o);
+        in_arena += arena.contains(o);
+    }
+    EXPECT_EQ(in_arena, 300u);  // 100 + 4 x 50 from the arena, the rest on the heap
+    EXPECT_LT(arena.remaining(), 50 * sizeof(Order));
+    for (int i = 0; i < 1000; ++i) ASSERT_EQ(objs[i]->account_id, static_cast<uint32_t>(i));
+    for (auto* o : objs) pool.free(o);
+    EXPECT_EQ(pool.get_size_used(), 0u);
+}
+
+TEST_F(TestSimpleObjectPool, NonTrivialTypeInArena) {
+    Tracked::ctor = Tracked::dtor = 0;
+    MemoryArena arena(64 * 1024, {.huge_pages = MemoryArena::HugePages::Never});
+    {
+        SimpleObjectPool<Tracked> pool(8, 8, &arena);
+        std::vector<Tracked*> objs;
+        for (int i = 0; i < 20; ++i) objs.push_back(pool.alloc(std::string(100, 'a'), i));
+        for (auto* t : objs) pool.free(t);
+    }
+    EXPECT_EQ(Tracked::ctor, 20);
+    EXPECT_EQ(Tracked::dtor, 20);
+}

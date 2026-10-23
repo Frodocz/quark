@@ -245,6 +245,7 @@ set(HEADER_FILES
         include/quark/math/ScaleInt.h
 
         include/quark/net/AliveMonitor.h
+        include/quark/net/BufferPool.h
         include/quark/net/IOBuffer.h
         include/quark/net/RxBuf.h
         include/quark/net/TxBuf.h
@@ -253,13 +254,17 @@ set(HEADER_FILES
         include/quark/utils/CircularBuffer.h
         include/quark/utils/DateTime.h
         include/quark/utils/FullDuplexShm.h
+        include/quark/utils/HwEndian.h
+        include/quark/utils/InplaceFunction.h
         include/quark/utils/JsonParser.h
+        include/quark/utils/MemoryArena.h
         include/quark/utils/MMapFile.h
         include/quark/utils/RdtscClock.h
         include/quark/utils/SimpleObjectPool.h
         include/quark/utils/TimerQueue.h
 
         # third party header-only libs
+        include/quark/third_party/inplace_function/inplace_function.h
         include/quark/third_party/SPSC_Queue/SPSCQueue.h
         include/quark/third_party/SPSC_Queue/SPSCQueueOPT.h
         include/quark/third_party/SPSC_Queue/SPSCVarQueue.h
