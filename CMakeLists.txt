@@ -252,6 +252,7 @@ set(HEADER_FILES
         include/quark/utils/JsonParser.h
         include/quark/utils/MMapFile.h
         include/quark/utils/RdtscClock.h
+        include/quark/utils/SimpleObjectPool.h
         include/quark/utils/TimerQueue.h
 
         # third party header-only libs
