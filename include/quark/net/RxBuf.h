@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quark/Attributes.h"
+#include "quark/QuarkError.h"
 
 #include <cassert>
 #include <cstring>
@@ -26,7 +27,9 @@ public:
         // aligned_alloc requires the size to be a multiple of the alignment
         buf_size_ = (capacity + kAlignment - 1) & ~(kAlignment - 1);
         buf_ = static_cast<char *>(std::aligned_alloc(kAlignment, buf_size_));
-        if (!buf_) throw std::bad_alloc();
+        if (!buf_) {
+            QUARK_THROW(QuarkError{"RxBuf allocation failed"});
+        }
     }
 
     ~RxBuf() { std::free(buf_); }

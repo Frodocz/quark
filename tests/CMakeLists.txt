@@ -45,4 +45,5 @@ quark_add_test(quark_test_tx_buf net/TxBufTest.cpp)
 
 # utils
 quark_add_test(quark_test_json_parser utils/JsonParserTest.cpp)
+quark_add_test(quark_test_timer_queue utils/TimerQueueTest.cpp)
 quark_add_test(quark_test_trading_day utils/TradingDayTest.cpp)

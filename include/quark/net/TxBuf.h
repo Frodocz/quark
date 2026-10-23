@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quark/Attributes.h"
+#include "quark/QuarkError.h"
 #include "quark/math/MathOps.h"
 
 #include <sys/uio.h>
@@ -26,7 +27,9 @@ public:
         assert(capacity > 0 && capacity <= (1 << 30));
         buf_size_ = std::bit_ceil(static_cast<uint32_t>(capacity));
         buf_ = static_cast<char *>(std::malloc(buf_size_));
-        if (!buf_) throw std::bad_alloc();
+        if (!buf_) {
+            QUARK_THROW(QuarkError{"TxBuf allocation failed"});
+        }
     }
 
     ~TxBuf() { std::free(buf_); }
