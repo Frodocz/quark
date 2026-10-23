@@ -28,4 +28,4 @@ function(quark_add_benchmark bench_target source_file)
 endfunction()
 
 quark_add_benchmark(quark_bench_buffer_pool net/BufferPoolBench.cpp)
-quark_add_benchmark(quark_bench_simple_object_pool utils/SimpleObjectPoolBench.cpp)
+quark_add_benchmark(quark_bench_simple_object_pool net/SimpleObjectPoolBench.cpp)

@@ -8,6 +8,8 @@
 
 QUARK_BEGIN_NAMESPACE
 
+namespace net {
+
 /// Exponential backoff for reconnects: initial, 2x initial, 4x initial, ... capped at `max_ns`,
 /// each spread by a random +/- `jitter` fraction so many clients (or many sessions of one client)
 /// that dropped together don't reconnect in lockstep.
@@ -59,5 +61,7 @@ private:
         return z ^ (z >> 31);
     }
 };
+
+} // namespace net
 
 QUARK_END_NAMESPACE

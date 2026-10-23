@@ -5,7 +5,7 @@
 #include <limits>
 #include <set>
 
-using namespace quark;
+using namespace quark::net;
 
 class TestExpBackoff : public ::testing::Test {};
 
