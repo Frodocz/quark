@@ -46,6 +46,7 @@ quark_add_test(quark_test_scale_int math/ScaleIntTest.cpp)
 # net
 quark_add_test(quark_test_alive_monitor net/AliveMonitorTest.cpp)
 quark_add_test(quark_test_buffer_pool net/BufferPoolTest.cpp)
+quark_add_test(quark_test_exp_backoff net/ExpBackoffTest.cpp)
 quark_add_test(quark_test_rx_buf net/RxBufTest.cpp)
 quark_add_test(quark_test_tx_buf net/TxBufTest.cpp)
 quark_add_test(quark_test_url net/UrlTest.cpp)
