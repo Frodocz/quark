@@ -80,6 +80,7 @@ endif ()
 # Required Packages
 #-------------------------------------------------------------------------------------------------------
 find_package(Threads REQUIRED)
+find_package(OpenSSL 3.0 REQUIRED)
 
 if (QUARK_BUILD_TESTS)
     enable_testing()
@@ -240,6 +241,10 @@ set(HEADER_FILES
         include/quark/QuarkLog.h
         include/quark/Sanitizers.h
 
+        include/quark/crypto/Base64Encoding.h
+        include/quark/crypto/Ed25519Signer.h
+        include/quark/crypto/HmacSha256.h
+
         include/quark/math/DoubleOps.h
         include/quark/math/MathOps.h
         include/quark/math/ScaleInt.h
@@ -276,6 +281,10 @@ set(SOURCE_FILES
         src/QuarkConfig.cpp
         src/QuarkLog.cpp
 
+        src/crypto/Ed25519Signer.cpp
+        src/crypto/HmacSha256.cpp
+        src/crypto/OpenSslError.h
+
         src/utils/DateTime.cpp
         src/utils/MMapFile.cpp
 )
@@ -295,6 +304,7 @@ target_link_libraries(${TARGET_NAME}
             $<BUILD_INTERFACE:tomlplusplus::tomlplusplus>
             absl::strings 
             absl::flat_hash_map
+            OpenSSL::Crypto
         PUBLIC
             quill::quill
             simdjson::simdjson
@@ -399,14 +409,15 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
         string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_NO_EXCEPTIONS -DQUILL_NO_EXCEPTIONS")
     endif ()
 
-    # absl is PRIVATE, but a static quark still needs it on the user's link line, and pkg-config only
-    # adds Requires.private libs with --static, so promote it to Requires for static builds
+    # absl and OpenSSL (libcrypto) are PRIVATE, but a static quark still needs them on the user's link
+    # line, and pkg-config only adds Requires.private libs with --static, so promote them to Requires
+    # for static builds
     set(QUARK_PKGCONFIG_REQUIRES "quill simdjson")
     set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "")
     if (BUILD_SHARED_LIBS)
-        set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "absl_strings absl_flat_hash_map")
+        set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "absl_strings absl_flat_hash_map libcrypto")
     else ()
-        string(APPEND QUARK_PKGCONFIG_REQUIRES " absl_strings absl_flat_hash_map")
+        string(APPEND QUARK_PKGCONFIG_REQUIRES " absl_strings absl_flat_hash_map libcrypto")
     endif ()
 
     # ---- pkg-config ---- #

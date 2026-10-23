@@ -2,6 +2,7 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(absl CONFIG)
+find_dependency(OpenSSL 3.0)
 find_dependency(simdjson CONFIG)
 find_dependency(quill @QUARK_QUILL_VERSION@ EXACT CONFIG)
 find_package(Threads REQUIRED)

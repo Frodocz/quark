@@ -34,6 +34,10 @@ function(quark_add_test test_target source_file)
     gtest_discover_tests(${test_target} DISCOVERY_MODE PRE_TEST)
 endfunction()
 
+# crypto
+quark_add_test(quark_test_encoding crypto/EncodingTest.cpp)
+quark_add_test(quark_test_crypto crypto/SignerTest.cpp)
+
 # maths
 quark_add_test(quark_test_double_ops math/DoubleOpsTest.cpp)
 quark_add_test(quark_test_math_ops math/MathOpsTest.cpp)
