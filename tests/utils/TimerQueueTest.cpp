@@ -2,9 +2,43 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdlib>
 #include <map>
 #include <memory>
+#include <new>
 #include <random>
+
+// Counts heap allocations so tests can check the hot path doesn't allocate.
+#if defined(__GNUC__) && !defined(__clang__)
+    // GCC flags the malloc/free pairing of the replaced operators below as mismatched
+    #pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+static std::atomic<long> g_heap_allocs{0};
+
+// All non-aligned forms are replaced so every new/delete pair agrees on malloc/free (the aligned
+// forms keep their default, self-consistent implementation).
+static void* counted_malloc(std::size_t n) noexcept {
+    g_heap_allocs.fetch_add(1, std::memory_order_relaxed);
+    return std::malloc(n == 0 ? 1 : n);
+}
+void* operator new(std::size_t n) {
+    if (void* p = counted_malloc(n)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t n) {
+    if (void* p = counted_malloc(n)) return p;
+    throw std::bad_alloc();
+}
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept { return counted_malloc(n); }
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return counted_malloc(n); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
 
 class TestTimerQueue : public ::testing::Test {};
 
@@ -307,4 +341,29 @@ TEST_F(TestTimerQueue, TestStaleIdNeverAliasesUnderHeavySlotReuse) {
         ASSERT_TRUE(tq.cancel(id));
     }
     EXPECT_TRUE(tq.empty());
+}
+
+TEST_F(TestTimerQueue, NoHeapAllocationInSteadyState) {
+    TimerQueue tq;
+    tq.reserve(256);
+    std::array<int64_t, 5> ctx{1, 2, 3, 4, 5};  // 40-byte capture: std::function would allocate
+    int64_t sum = 0;
+    int64_t now = 1'000'000;
+    tq.add_task("heartbeat", [&sum] { ++sum; return true; }, now, 10'000);
+
+    // the counter must see real allocations, or the check below would pass vacuously
+    const long probe = g_heap_allocs.load();
+    int* volatile p = new int(1);
+    delete p;
+    ASSERT_GT(g_heap_allocs.load(), probe);
+
+    const long before = g_heap_allocs.load();
+    for (int i = 0; i < 10'000; ++i) {
+        now += 1'000;
+        const TimerId id = tq.add_task("order_timeout", [ctx, &sum] { sum += ctx[4]; return true; }, now + 500);
+        if (i % 3 == 0) tq.cancel(id);  // e.g. the order filled before its timeout
+        tq.poll(now);
+    }
+    EXPECT_EQ(g_heap_allocs.load() - before, 0);
+    EXPECT_GT(sum, 0);
 }

@@ -2,11 +2,11 @@
 
 #include "quark/Attributes.h"
 #include "quark/QuarkLog.h"
+#include "quark/utils/InplaceFunction.h"
 #include "quark/utils/RdtscClock.h"
 
 #include <cassert>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -42,10 +42,12 @@ inline constexpr TimerId kInvalidTimerId{};
 ///   not replayed in a burst, and the schedule does not drift.
 ///
 /// Callbacks return true to keep a repeating task alive, false to stop it (ignored for
-/// one-shot tasks). Callbacks must not throw.
+/// one-shot tasks). Callbacks must not throw. They are stored inline (no allocation): a callable
+/// larger than kCallbackCapacity bytes, e.g. a lambda capturing too much by value, fails to compile.
 class TimerQueue {
 public:
-    using Callback = std::function<bool()>;
+    static constexpr std::size_t kCallbackCapacity = 64;
+    using Callback = InplaceFunction<bool(), kCallbackCapacity>;
 
     static constexpr int64_t MIN_REPEAT_INTERVAL_NS = 2'000;  // 2us
 

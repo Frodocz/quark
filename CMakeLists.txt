@@ -238,6 +238,7 @@ set(HEADER_FILES
         include/quark/QuarkError.h
         include/quark/QuarkFormat.h
         include/quark/QuarkLog.h
+        include/quark/Sanitizers.h
 
         include/quark/math/DoubleOps.h
         include/quark/math/MathOps.h
@@ -245,6 +246,7 @@ set(HEADER_FILES
 
         include/quark/net/RxBuf.h
         include/quark/net/TxBuf.h
+        include/quark/net/Url.h
 
         include/quark/utils/CircularBuffer.h
         include/quark/utils/DateTime.h

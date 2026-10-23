@@ -42,8 +42,11 @@ quark_add_test(quark_test_scale_int math/ScaleIntTest.cpp)
 # net
 quark_add_test(quark_test_rx_buf net/RxBufTest.cpp)
 quark_add_test(quark_test_tx_buf net/TxBufTest.cpp)
+quark_add_test(quark_test_url net/UrlTest.cpp)
 
 # utils
+quark_add_test(quark_test_hw_endian utils/HwEndianTest.cpp)
+quark_add_test(quark_test_inplace_function utils/InplaceFunctionTest.cpp)
 quark_add_test(quark_test_json_parser utils/JsonParserTest.cpp)
 quark_add_test(quark_test_simple_object_pool utils/SimpleObjectPoolTest.cpp)
 quark_add_test(quark_test_timer_queue utils/TimerQueueTest.cpp)

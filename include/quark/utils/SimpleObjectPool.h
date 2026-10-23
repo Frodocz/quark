@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quark/Attributes.h"
+#include "quark/Sanitizers.h"
 
 #include <cassert>
 #include <cstddef>
@@ -14,15 +15,6 @@
 
 #ifndef NDEBUG
     #include <unordered_set>
-#endif
-
-#if defined(__SANITIZE_ADDRESS__) || QUARK_HAS_FEATURE(address_sanitizer)
-    #include <sanitizer/asan_interface.h>
-    #define QUARK_POOL_POISON(addr, size) ASAN_POISON_MEMORY_REGION(addr, size)
-    #define QUARK_POOL_UNPOISON(addr, size) ASAN_UNPOISON_MEMORY_REGION(addr, size)
-#else
-    #define QUARK_POOL_POISON(addr, size) ((void)(addr), (void)(size))
-    #define QUARK_POOL_UNPOISON(addr, size) ((void)(addr), (void)(size))
 #endif
 
 QUARK_BEGIN_NAMESPACE
@@ -57,7 +49,7 @@ public:
         assert((std::is_trivially_destructible_v<T> || used_ == 0) &&
                "SimpleObjectPool destroyed with live objects that need destruction");
         for (const Chunk& c : chunks_) {
-            QUARK_POOL_UNPOISON(c.slots, c.count * sizeof(Slot));
+            QUARK_ASAN_UNPOISON(c.slots, c.count * sizeof(Slot));
             ::operator delete(c.slots, std::align_val_t{kChunkAlignment});
         }
     }
@@ -74,7 +66,7 @@ public:
 
         Slot* s = free_.back();
         free_.pop_back();
-        QUARK_POOL_UNPOISON(s, sizeof(Slot));
+        QUARK_ASAN_UNPOISON(s, sizeof(Slot));
 
         if constexpr (std::is_nothrow_constructible_v<T, Args...>) {
             return finish_alloc(::new (static_cast<void*>(s)) T(std::forward<Args>(args)...));
@@ -146,7 +138,7 @@ private:
     void push_free(void* p) noexcept {
         Slot* s = static_cast<Slot*>(p);
         free_.push_back(s);  // never reallocates: reserved to capacity_
-        QUARK_POOL_POISON(s, sizeof(Slot));
+        QUARK_ASAN_POISON(s, sizeof(Slot));
     }
 
     QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void grow() { add_chunk(batch_sz_); }
@@ -218,5 +210,3 @@ using QuarkObjectPool = SimpleObjectPool<T>;
 
 QUARK_END_NAMESPACE
 
-#undef QUARK_POOL_POISON
-#undef QUARK_POOL_UNPOISON
