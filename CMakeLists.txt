@@ -244,6 +244,8 @@ set(HEADER_FILES
         include/quark/math/MathOps.h
         include/quark/math/ScaleInt.h
 
+        include/quark/net/AliveMonitor.h
+        include/quark/net/IOBuffer.h
         include/quark/net/RxBuf.h
         include/quark/net/TxBuf.h
         include/quark/net/Url.h
