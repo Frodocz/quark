@@ -257,7 +257,9 @@ set(HEADER_FILES
         include/quark/net/IOBuffer.h
         include/quark/net/Poller.h
         include/quark/net/RxBuf.h
+        include/quark/net/Stream.h
         include/quark/net/SysApi.h
+        include/quark/net/TcpSocket.h
         include/quark/net/TxBuf.h
         include/quark/net/Url.h
 
