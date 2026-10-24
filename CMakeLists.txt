@@ -260,6 +260,8 @@ set(HEADER_FILES
         include/quark/net/Stream.h
         include/quark/net/SysApi.h
         include/quark/net/TcpSocket.h
+        include/quark/net/TlsContext.h
+        include/quark/net/TlsStream.h
         include/quark/net/TxBuf.h
         include/quark/net/Url.h
 
@@ -293,6 +295,9 @@ set(SOURCE_FILES
         src/crypto/OpenSslError.h
 
         src/net/Endpoint.cpp
+        src/net/TlsContext.cpp
+        src/net/TlsInternal.h
+        src/net/TlsStream.cpp
 
         src/utils/DateTime.cpp
         src/utils/MMapFile.cpp
