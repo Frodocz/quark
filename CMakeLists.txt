@@ -264,6 +264,7 @@ set(HEADER_FILES
         include/quark/net/TlsStream.h
         include/quark/net/TxBuf.h
         include/quark/net/Url.h
+        include/quark/net/WsFrame.h
 
         include/quark/utils/CircularBuffer.h
         include/quark/utils/DateTime.h

@@ -51,6 +51,7 @@ quark_add_test(quark_test_exp_backoff net/ExpBackoffTest.cpp)
 quark_add_test(quark_test_rx_buf net/RxBufTest.cpp)
 quark_add_test(quark_test_tx_buf net/TxBufTest.cpp)
 quark_add_test(quark_test_url net/UrlTest.cpp)
+quark_add_test(quark_test_ws_frame net/WsFrameTest.cpp)
 
 # utils
 quark_add_test(quark_test_hw_endian utils/HwEndianTest.cpp)
