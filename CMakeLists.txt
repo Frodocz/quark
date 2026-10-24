@@ -265,6 +265,7 @@ set(HEADER_FILES
         include/quark/net/TxBuf.h
         include/quark/net/Url.h
         include/quark/net/WsFrame.h
+        include/quark/net/WsHandshake.h
 
         include/quark/utils/CircularBuffer.h
         include/quark/utils/DateTime.h
@@ -299,6 +300,7 @@ set(SOURCE_FILES
         src/net/TlsContext.cpp
         src/net/TlsInternal.h
         src/net/TlsStream.cpp
+        src/net/WsHandshake.cpp
 
         src/utils/DateTime.cpp
         src/utils/MMapFile.cpp
