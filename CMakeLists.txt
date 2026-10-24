@@ -252,10 +252,12 @@ set(HEADER_FILES
         include/quark/net/AliveMonitor.h
         include/quark/net/BufferPool.h
         include/quark/net/Endpoint.h
+        include/quark/net/EventLoop.h
         include/quark/net/ExpBackoff.h
         include/quark/net/IOBuffer.h
         include/quark/net/Poller.h
         include/quark/net/RxBuf.h
+        include/quark/net/SysApi.h
         include/quark/net/TxBuf.h
         include/quark/net/Url.h
 
