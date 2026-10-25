@@ -35,7 +35,7 @@ namespace net {
 /// - The session of the last connection is kept and resumed on the next connect().
 ///
 /// Not movable (OpenSSL callbacks point back to it).
-class TlsStream {
+class QUARK_API TlsStream {
 public:
     static constexpr std::size_t kMaxPendingCiphertext = 64 * 1024;
 

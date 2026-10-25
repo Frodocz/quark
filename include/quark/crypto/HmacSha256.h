@@ -17,7 +17,7 @@ namespace crypto {
 /// The SHA-256 states after absorbing the inner and outer padded keys (RFC 2104) are computed
 /// once in the constructor, so sign() hashes only the message and never allocates. Not
 /// thread-safe: use one instance per thread.
-class HmacSha256 {
+class QUARK_API HmacSha256 {
 public:
     static constexpr std::size_t kDigestSize = 32;
     using Digest = std::array<uint8_t, kDigestSize>;

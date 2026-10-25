@@ -200,8 +200,8 @@ private:
     std::string leftover_;
 };
 
-/// Accepts connections on 127.0.0.1 (ephemeral port) and runs `handler` for each, one at a time,
-/// on a background thread.
+/// Accepts connections on Options::bind_ip (127.0.0.1 by default, ephemeral port) and runs `handler`
+/// for each, one at a time, on a background thread.
 class TestServer {
 public:
     using Handler = std::function<void(ServerConn&, TestServer&)>;
@@ -209,6 +209,7 @@ public:
     struct Options {
         bool tls{false};
         int rcvbuf{0};  ///< SO_RCVBUF of accepted sockets (0: default), to provoke backpressure
+        const char* bind_ip{"127.0.0.1"};  ///< e.g. a NIC address for clients that aren't local
     };
 
     explicit TestServer(Handler handler) : TestServer(std::move(handler), Options{}) {}
@@ -223,7 +224,7 @@ public:
         if (opts_.rcvbuf > 0) ::setsockopt(listen_fd_, SOL_SOCKET, SO_RCVBUF, &opts_.rcvbuf, sizeof(opts_.rcvbuf));
         sockaddr_in a{};
         a.sin_family = AF_INET;
-        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        ::inet_pton(AF_INET, opts_.bind_ip, &a.sin_addr);
         ::bind(listen_fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a));
         ::listen(listen_fd_, 16);
         socklen_t len = sizeof(a);
@@ -251,7 +252,7 @@ public:
         }
     }
 
-    [[nodiscard]] Endpoint endpoint() const { return *Endpoint::from_ip("127.0.0.1", port_); }
+    [[nodiscard]] Endpoint endpoint() const { return *Endpoint::from_ip(opts_.bind_ip, port_); }
     [[nodiscard]] uint16_t port() const { return port_; }
     [[nodiscard]] int accepted() const { return accepted_.load(); }
     [[nodiscard]] bool stopping() const { return stopping_.load(); }

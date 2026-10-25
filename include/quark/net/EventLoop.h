@@ -13,12 +13,18 @@
 #include <cstdint>
 #include <vector>
 
+#if defined(QUARK_USE_FSTACK)
+    #include "quark/net/FStack.h"
+
+    #include <ff_api.h>
+#endif
+
 QUARK_BEGIN_NAMESPACE
 
 namespace net {
 
 /// Something the loop drives: a connection registers while it has an open socket.
-class Pollable {
+class QUARK_API Pollable {
 public:
     virtual ~Pollable() = default;
     [[nodiscard]] virtual int fd() const noexcept = 0;
@@ -40,9 +46,14 @@ struct EventLoopConfig {
 /// Single-threaded reactor: one per core, nothing shared, no locks. Everything registered with
 /// it, and every call into it, runs on the thread that calls step()/run().
 ///
-/// Each step(): runs the step hook (e.g. drains an SPSC queue of outgoing orders), drives the
-/// connections, then fires due timers. step() can also be called from an existing loop
-/// instead of run().
+/// Each step(): runs the step hook (e.g. drains a queue of work posted by other threads), drives
+/// the connections, then fires due timers. With kernel sockets step() can also be called from an
+/// existing loop instead of run().
+///
+/// F-Stack builds (QUARK_USE_FSTACK): packets are only processed inside F-Stack's own loop, so
+/// run() is the entry point (it calls step() once per F-Stack iteration) and application work
+/// belongs in the step hook. F-Stack tears DPDK down when that loop ends: run() works once per
+/// process, on the thread that called init_fstack().
 class EventLoop {
 public:
     using StepHook = InplaceFunction<void(), 64>;
@@ -121,7 +132,12 @@ public:
     /// Calls step() until stop().
     void run() {
         running_.store(true, std::memory_order_relaxed);
+#if defined(QUARK_USE_FSTACK)
+        ::ff_run(&EventLoop::fstack_iteration, this);
+        detail::set_fstack_active(false);  // DPDK is gone: sockets closed from now on skip F-Stack
+#else
         while (running_.load(std::memory_order_relaxed)) step();
+#endif
     }
 
     /// Makes run() return after the current step. Callable from any thread.
@@ -133,6 +149,18 @@ public:
     }
 
 private:
+#if defined(QUARK_USE_FSTACK)
+    static int fstack_iteration(void* arg) {
+        auto* self = static_cast<EventLoop*>(arg);
+        if (!self->running_.load(std::memory_order_relaxed)) {
+            ::ff_stop_run();
+            return 0;
+        }
+        self->step();
+        return 0;
+    }
+#endif
+
     EventLoopConfig cfg_;
     Poller poller_;
     std::vector<Pollable*> pollables_;

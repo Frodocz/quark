@@ -23,17 +23,17 @@ struct WsHandshakeKey {
 };
 
 /// A fresh key from the OS random source, with its expected accept value.
-WsHandshakeKey make_ws_handshake_key();
+QUARK_API WsHandshakeKey make_ws_handshake_key();
 
 /// base64(SHA-1(key + RFC 6455 GUID)) of a base64 `key`, into `out`.
-void compute_ws_accept(std::string_view key, std::span<char, 28> out);
+QUARK_API void compute_ws_accept(std::string_view key, std::span<char, 28> out);
 
 /// 64 random bits from the OS (getrandom), e.g. to seed per-session generators.
-uint64_t os_random_u64();
+QUARK_API uint64_t os_random_u64();
 
 /// Appends the HTTP/1.1 upgrade request to `out`. `host` is the Host header value (with
 /// ":port" when not the scheme's default), `extra_headers` complete "Name: value\r\n" lines.
-void build_ws_upgrade_request(std::string& out, std::string_view host, std::string_view target,
+QUARK_API void build_ws_upgrade_request(std::string& out, std::string_view host, std::string_view target,
                               std::string_view key, std::string_view extra_headers);
 
 struct WsUpgradeResponse {
@@ -44,7 +44,7 @@ struct WsUpgradeResponse {
 };
 
 /// Validates a possibly partial upgrade response against `expected_accept`.
-[[nodiscard]] WsUpgradeResponse parse_ws_upgrade_response(std::span<const uint8_t> resp,
+[[nodiscard]] QUARK_API WsUpgradeResponse parse_ws_upgrade_response(std::span<const uint8_t> resp,
                                                           std::string_view expected_accept) noexcept;
 
 } // namespace net

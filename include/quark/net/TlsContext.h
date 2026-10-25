@@ -15,7 +15,7 @@ namespace net {
 /// Client TLS configuration shared by the TlsStreams of one event loop: CA trust, peer
 /// verification, protocol versions, ALPN and session resumption. Cold path; throws QuarkError
 /// on misconfiguration.
-class TlsContext {
+class QUARK_API TlsContext {
 public:
     struct Options {
         /// Verify the server certificate chain and its hostname (TlsStream refuses to connect

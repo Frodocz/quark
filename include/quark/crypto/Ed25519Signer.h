@@ -19,7 +19,7 @@ namespace crypto {
 /// Ed25519 (RFC 8032) signatures with a fixed private key, e.g. Binance Ed25519 API keys
 /// (WebSocket API session.logon). Signing costs tens of microseconds: keep it off the per-order
 /// path (log on once, then send unsigned requests). Not thread-safe: use one instance per thread.
-class Ed25519Signer {
+class QUARK_API Ed25519Signer {
 public:
     static constexpr std::size_t kKeySize = 32;
     static constexpr std::size_t kSignatureSize = 64;

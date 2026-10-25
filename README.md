@@ -131,6 +131,34 @@ add_subdirectory(quark)
 add_executable(my_project main.cpp)
 target_link_libraries(my_project PUBLIC quark::quark)
 ```
+
+### F-Stack backend (optional)
+
+By default `quark::net` uses kernel sockets. Building with `-DQUARK_USE_FSTACK=ON` runs the same API
+over [F-Stack](https://github.com/F-Stack/f-stack) (a userspace TCP/IP stack on DPDK) instead,
+chosen at compile time with no runtime cost. It needs F-Stack and DPDK installed
+(`libfstack.a` under `-DFSTACK_PREFIX=...`, default `/usr/local`; `libdpdk` found by pkg-config).
+
+```cpp
+#include "quark/net/EventLoop.h"
+#include "quark/net/FStack.h"
+
+int main(int argc, char** argv) {
+    // argv must contain "--conf <f-stack.conf>"; run as root (DPDK owns the NIC)
+    if (!quark::net::init_fstack(argc, argv)) return 1;
+    quark::net::EventLoop loop;
+    // create sessions on `loop`, put per-iteration work in loop.set_step_hook(...)
+    loop.run();  // F-Stack's loop: once per process, on this thread
+}
+```
+
+F-Stack only processes packets inside its own loop, so under F-Stack `EventLoop::run()` is the
+entry point: calling `step()` from your own loop isn't enough. On AWS, give DPDK a dedicated ENI
+(the instance keeps its primary ENI for SSH, DNS and the kernel) and set that ENI's address,
+netmask and gateway in the `[port0]` section of `f-stack.conf`; ENA doesn't support promiscuous
+mode, so its warning at startup is expected. The F-Stack tests run by hand:
+`sudo ./tests/quark_test_fstack --conf <f-stack.conf>`.
+
 ---
 
 ## License

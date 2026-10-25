@@ -24,6 +24,7 @@ option(QUARK_LOG_HUGE_PAGES "Back logging queues with 2 MiB huge pages, falling 
 option(QUARK_NO_EXCEPTIONS "Build without exception handling support." OFF)
 option(QUARK_SANITIZE_ADDRESS "Enable AddressSanitizer (ASan) for memory error detection in tests." OFF)
 option(QUARK_SANITIZE_THREAD "Enable ThreadSanitizer (TSan) for detecting thread-related issues in tests. Note: Using this option with non-Clang compilers may produce false positives." OFF)
+option(QUARK_USE_FSTACK "Run quark::net over F-Stack (DPDK userspace TCP/IP) instead of kernel sockets." OFF)
 option(QUARK_USE_VALGRIND "Use Valgrind as the default memory checking tool in CTest. Valgrind must be installed." OFF)
 
 # Internal option
@@ -195,6 +196,7 @@ message(STATUS "QUARK_LOG_HUGE_PAGES: " ${QUARK_LOG_HUGE_PAGES})
 message(STATUS "QUARK_LOG_INITIAL_QUEUE_CAPACITY: " ${QUARK_LOG_INITIAL_QUEUE_CAPACITY})
 message(STATUS "QUARK_LOG_QUEUE_TYPE: " ${QUARK_LOG_QUEUE_TYPE})
 message(STATUS "QUARK_NO_EXCEPTIONS: " ${QUARK_NO_EXCEPTIONS})
+message(STATUS "QUARK_USE_FSTACK: " ${QUARK_USE_FSTACK})
 message(STATUS "QUARK_USE_STD_FORMAT: " ${QUARK_USE_STD_FORMAT})
 
 #-------------------------------------------------------------------------------------------------------
@@ -254,6 +256,7 @@ set(HEADER_FILES
         include/quark/net/Endpoint.h
         include/quark/net/EventLoop.h
         include/quark/net/ExpBackoff.h
+        include/quark/net/FStack.h
         include/quark/net/HttpClient.h
         include/quark/net/HttpCodec.h
         include/quark/net/IOBuffer.h
@@ -309,6 +312,10 @@ set(SOURCE_FILES
         src/utils/MMapFile.cpp
 )
 
+if (QUARK_USE_FSTACK)
+    list(APPEND SOURCE_FILES src/net/FStack.cpp)
+endif ()
+
 # Add as a library
 add_library(${TARGET_NAME} ${SOURCE_FILES} ${HEADER_FILES})
 add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
@@ -334,6 +341,13 @@ target_link_libraries(${TARGET_NAME}
 
 target_compile_features(${TARGET_NAME} PUBLIC cxx_std_20)
 
+# Only QUARK_API symbols are exported from a shared quark; header-only code needs no export
+set_target_properties(${TARGET_NAME} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+if (BUILD_SHARED_LIBS)
+    # keep the symbols of statically linked dependencies (absl, simdjson) out of libquark.so
+    target_link_options(${TARGET_NAME} PRIVATE "LINKER:--exclude-libs,ALL")
+endif ()
+
 target_compile_options(${TARGET_NAME} PRIVATE
         $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-Wall -Wextra -Wpedantic>)
 
@@ -347,6 +361,24 @@ target_include_directories(${TARGET_NAME}
 
 # PUBLIC: QUARK_THROW in quark's inline headers (e.g. JsonParser.h) must abort rather than throw in user code.
 # quill is header-only, so QUILL_NO_EXCEPTIONS works whether quill was fetched, found or given by a parent.
+# F-Stack backend: PUBLIC, since quark::net's headers call the ff_* API in the user's translation units
+if (QUARK_USE_FSTACK)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(DPDK REQUIRED libdpdk)
+    set(FSTACK_PREFIX /usr/local CACHE PATH "F-Stack install prefix (include/ff_api.h, lib/libfstack.a)")
+    target_compile_definitions(${TARGET_NAME} PUBLIC QUARK_USE_FSTACK)
+    target_include_directories(${TARGET_NAME} SYSTEM PUBLIC ${FSTACK_PREFIX}/include)
+    target_compile_options(${TARGET_NAME} PRIVATE ${DPDK_CFLAGS_OTHER})
+    # --whole-archive: F-Stack registers its DPDK drivers from static constructors that would
+    # otherwise be dropped as unreferenced. The FreeBSD-derived subsystems inside libfstack.a
+    # need zlib, pcap, numa and OpenSSL after it.
+    target_link_options(${TARGET_NAME} PUBLIC
+            -L${FSTACK_PREFIX}/lib
+            ${DPDK_STATIC_LDFLAGS}
+            "SHELL:-Wl,--whole-archive,-lfstack,--no-whole-archive"
+            -pthread -lm -lrt -ldl -lnuma -lz -lpcap -lssl -lcrypto)
+endif ()
+
 if (QUARK_NO_EXCEPTIONS)
     target_compile_definitions(${TARGET_NAME} PUBLIC QUARK_NO_EXCEPTIONS QUILL_NO_EXCEPTIONS)
     target_compile_options(${TARGET_NAME} PRIVATE
@@ -428,6 +460,12 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     endif ()
     if (QUARK_NO_EXCEPTIONS)
         string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_NO_EXCEPTIONS -DQUILL_NO_EXCEPTIONS")
+    endif ()
+    set(QUARK_PKGCONFIG_LIBS_EXTRA "")
+    if (QUARK_USE_FSTACK)
+        string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_USE_FSTACK -I${FSTACK_PREFIX}/include")
+        string(JOIN " " DPDK_STATIC_LDFLAGS_STR ${DPDK_STATIC_LDFLAGS})
+        set(QUARK_PKGCONFIG_LIBS_EXTRA " -L${FSTACK_PREFIX}/lib ${DPDK_STATIC_LDFLAGS_STR} -Wl,--whole-archive,-lfstack,--no-whole-archive -lm -lrt -ldl -lnuma -lz -lpcap -lssl -lcrypto")
     endif ()
 
     # absl and OpenSSL (libssl, libcrypto) are PRIVATE, but a static quark still needs them on the user's link

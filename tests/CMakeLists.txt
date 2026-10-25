@@ -46,7 +46,6 @@ quark_add_test(quark_test_scale_int math/ScaleIntTest.cpp)
 # net
 quark_add_test(quark_test_alive_monitor net/AliveMonitorTest.cpp)
 quark_add_test(quark_test_buffer_pool net/BufferPoolTest.cpp)
-quark_add_test(quark_test_event_loop net/EventLoopTest.cpp)
 quark_add_test(quark_test_exp_backoff net/ExpBackoffTest.cpp)
 quark_add_test(quark_test_http_codec net/HttpCodecTest.cpp)
 quark_add_test(quark_test_rx_buf net/RxBufTest.cpp)
@@ -55,14 +54,25 @@ quark_add_test(quark_test_url net/UrlTest.cpp)
 quark_add_test(quark_test_ws_frame net/WsFrameTest.cpp)
 quark_add_test(quark_test_ws_handshake net/WsHandshakeTest.cpp)
 
-# net integration tests against loopback TCP/TLS servers (tests/net/TestServers.h, OpenSSL server side)
-quark_add_test(quark_test_tcp_socket net/TcpSocketTest.cpp)
-quark_add_test(quark_test_tls_stream net/TlsStreamTest.cpp)
-quark_add_test(quark_test_ws_session net/WsSessionTest.cpp)
-quark_add_test(quark_test_http_client net/HttpClientTest.cpp)
-foreach (net_test quark_test_tcp_socket quark_test_tls_stream quark_test_ws_session quark_test_http_client)
-    target_link_libraries(${net_test} PRIVATE OpenSSL::SSL)
-endforeach ()
+if (NOT QUARK_USE_FSTACK)
+    # event loop and integration tests against loopback TCP/TLS servers (tests/net/TestServers.h,
+    # OpenSSL server side); they need kernel sockets
+    quark_add_test(quark_test_event_loop net/EventLoopTest.cpp)
+    quark_add_test(quark_test_tcp_socket net/TcpSocketTest.cpp)
+    quark_add_test(quark_test_tls_stream net/TlsStreamTest.cpp)
+    quark_add_test(quark_test_ws_session net/WsSessionTest.cpp)
+    quark_add_test(quark_test_http_client net/HttpClientTest.cpp)
+    foreach (net_test quark_test_tcp_socket quark_test_tls_stream quark_test_ws_session quark_test_http_client)
+        target_link_libraries(${net_test} PRIVATE OpenSSL::SSL)
+    endforeach ()
+else ()
+    # F-Stack: one binary with its own main (F-Stack's loop must own the main thread), run by hand
+    # as root: sudo ./quark_test_fstack --conf <f-stack.conf>. Not registered with ctest.
+    add_executable(quark_test_fstack net/FStackTest.cpp)
+    quark_set_common_compile_options(quark_test_fstack)
+    target_link_libraries(quark_test_fstack PRIVATE quark::quark GTest::gtest OpenSSL::SSL)
+    target_compile_definitions(quark_test_fstack PRIVATE QUARK_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+endif ()
 
 # utils
 quark_add_test(quark_test_hw_endian utils/HwEndianTest.cpp)

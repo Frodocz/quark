@@ -16,7 +16,7 @@ namespace net {
 
 /// A resolved IPv4 address and port, in network byte order. Trivially copyable: resolve once
 /// (cold path) and reuse it across reconnects.
-struct Endpoint {
+struct QUARK_API Endpoint {
     uint32_t ip_be{0};
     uint16_t port_be{0};
 
