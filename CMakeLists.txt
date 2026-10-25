@@ -254,6 +254,8 @@ set(HEADER_FILES
         include/quark/net/Endpoint.h
         include/quark/net/EventLoop.h
         include/quark/net/ExpBackoff.h
+        include/quark/net/HttpClient.h
+        include/quark/net/HttpCodec.h
         include/quark/net/IOBuffer.h
         include/quark/net/Poller.h
         include/quark/net/RxBuf.h
@@ -266,6 +268,7 @@ set(HEADER_FILES
         include/quark/net/Url.h
         include/quark/net/WsFrame.h
         include/quark/net/WsHandshake.h
+        include/quark/net/WsSession.h
 
         include/quark/utils/CircularBuffer.h
         include/quark/utils/DateTime.h
@@ -321,6 +324,7 @@ target_link_libraries(${TARGET_NAME}
             $<BUILD_INTERFACE:tomlplusplus::tomlplusplus>
             absl::strings 
             absl::flat_hash_map
+            OpenSSL::SSL
             OpenSSL::Crypto
         PUBLIC
             quill::quill
@@ -426,15 +430,15 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
         string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_NO_EXCEPTIONS -DQUILL_NO_EXCEPTIONS")
     endif ()
 
-    # absl and OpenSSL (libcrypto) are PRIVATE, but a static quark still needs them on the user's link
+    # absl and OpenSSL (libssl, libcrypto) are PRIVATE, but a static quark still needs them on the user's link
     # line, and pkg-config only adds Requires.private libs with --static, so promote them to Requires
     # for static builds
     set(QUARK_PKGCONFIG_REQUIRES "quill simdjson")
     set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "")
     if (BUILD_SHARED_LIBS)
-        set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "absl_strings absl_flat_hash_map libcrypto")
+        set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "absl_strings absl_flat_hash_map libssl libcrypto")
     else ()
-        string(APPEND QUARK_PKGCONFIG_REQUIRES " absl_strings absl_flat_hash_map libcrypto")
+        string(APPEND QUARK_PKGCONFIG_REQUIRES " absl_strings absl_flat_hash_map libssl libcrypto")
     endif ()
 
     # ---- pkg-config ---- #
