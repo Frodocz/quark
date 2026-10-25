@@ -29,6 +29,7 @@ endfunction()
 
 quark_add_benchmark(quark_bench_buffer_pool net/BufferPoolBench.cpp)
 quark_add_benchmark(quark_bench_simple_object_pool net/SimpleObjectPoolBench.cpp)
+quark_add_benchmark(quark_bench_loop_utils utils/LoopUtilsBench.cpp)
 
 # reuses the loopback servers and test certificate of the net tests (kernel sockets)
 if (NOT QUARK_USE_FSTACK)

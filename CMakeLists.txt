@@ -261,28 +261,29 @@ set(HEADER_FILES
         include/quark/net/HttpCodec.h
         include/quark/net/IOBuffer.h
         include/quark/net/Poller.h
-        include/quark/net/RxBuf.h
         include/quark/net/Stream.h
         include/quark/net/SysApi.h
         include/quark/net/TcpSocket.h
         include/quark/net/TlsContext.h
         include/quark/net/TlsStream.h
-        include/quark/net/TxBuf.h
         include/quark/net/Url.h
         include/quark/net/WsFrame.h
         include/quark/net/WsHandshake.h
         include/quark/net/WsSession.h
 
         include/quark/utils/CircularBuffer.h
+        include/quark/utils/CommandQueue.h
         include/quark/utils/DateTime.h
         include/quark/utils/FullDuplexShm.h
         include/quark/utils/HwEndian.h
         include/quark/utils/InplaceFunction.h
         include/quark/utils/JsonParser.h
+        include/quark/utils/LatencyHistogram.h
         include/quark/utils/MemoryArena.h
         include/quark/utils/MMapFile.h
         include/quark/utils/RdtscClock.h
         include/quark/utils/SimpleObjectPool.h
+        include/quark/utils/System.h
         include/quark/utils/TimerQueue.h
 
         # third party header-only libs
@@ -310,6 +311,7 @@ set(SOURCE_FILES
 
         src/utils/DateTime.cpp
         src/utils/MMapFile.cpp
+        src/utils/System.cpp
 )
 
 if (QUARK_USE_FSTACK)

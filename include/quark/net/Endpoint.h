@@ -43,6 +43,14 @@ struct QUARK_API Endpoint {
     /// The first address of resolve_all(), std::nullopt on failure. BLOCKING.
     static std::optional<Endpoint> resolve(std::string_view host, uint16_t port);
 
+    /// The IPv4 address of the kernel network interface `name` (e.g. "ens5"), port 0;
+    /// std::nullopt if it doesn't exist, is down or has no IPv4 address. Cold path.
+    static std::optional<Endpoint> interface_ip(std::string_view name);
+
+    /// The local address the kernel's routing table picks to reach `remote` (no packet is sent),
+    /// port 0. Cold path. Both helpers describe kernel interfaces, not an F-Stack/DPDK port.
+    static std::optional<Endpoint> source_ip_for(const Endpoint& remote);
+
     friend bool operator==(const Endpoint&, const Endpoint&) = default;
 };
 

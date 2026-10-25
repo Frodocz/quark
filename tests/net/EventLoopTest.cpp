@@ -97,3 +97,14 @@ TEST_F(TestEndpoint, Resolve) {
     EXPECT_EQ(Endpoint::resolve("127.0.0.1", 443)->to_string(), "127.0.0.1:443");
     EXPECT_FALSE(Endpoint::resolve("no-such-host.invalid", 443));
 }
+
+TEST_F(TestEndpoint, LocalAddressHelpers) {
+    const auto lo = Endpoint::interface_ip("lo");
+    ASSERT_TRUE(lo);
+    EXPECT_EQ(lo->to_string(), "127.0.0.1:0");
+    EXPECT_FALSE(Endpoint::interface_ip("no-such-if0"));
+
+    const auto src = Endpoint::source_ip_for(*Endpoint::from_ip("127.0.0.1", 443));
+    ASSERT_TRUE(src);
+    EXPECT_EQ(src->to_string(), "127.0.0.1:0");
+}
