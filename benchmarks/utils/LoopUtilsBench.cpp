@@ -43,8 +43,9 @@ void BM_CommandQueueCrossThread(benchmark::State& state) {
 }
 BENCHMARK(BM_CommandQueueCrossThread)->UseRealTime();
 
+template <int Bits>
 void BM_LatencyHistogramRecord(benchmark::State& state) {
-    LatencyHistogram h;
+    BasicLatencyHistogram<Bits> h;
     std::vector<int64_t> samples(4096);
     std::mt19937_64 rng(1);
     for (auto& s : samples) s = static_cast<int64_t>(rng() % 1'000'000);
@@ -56,6 +57,7 @@ void BM_LatencyHistogramRecord(benchmark::State& state) {
     }
     benchmark::DoNotOptimize(h.count());
 }
-BENCHMARK(BM_LatencyHistogramRecord);
+BENCHMARK(BM_LatencyHistogramRecord<5>)->Name("BM_LatencyHistogramRecord/5bits");
+BENCHMARK(BM_LatencyHistogramRecord<7>)->Name("BM_LatencyHistogramRecord/7bits");
 
 } // namespace

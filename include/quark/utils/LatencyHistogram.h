@@ -9,13 +9,24 @@
 
 QUARK_BEGIN_NAMESPACE
 
-/// Fixed-size log-linear histogram of non-negative int64 samples, e.g. latencies in ns from TSC
-/// deltas. Each power of two is split into 32 equal sub-buckets, so a percentile is reported
-/// within ~3% of the true sample value (exact below 64). record() is a few instructions, never
-/// allocates; 16 KiB. Single-threaded: keep one per thread and merge() them for reports.
-class LatencyHistogram {
+/// Fixed-size log-linear histogram of non-negative int64 samples, e.g. latencies as TSC deltas.
+/// Each power of two is split into 2^SubBucketBits equal buckets; a percentile reports the upper
+/// edge of the bucket holding the sample, so it is never below the true value and at most
+/// 1/2^SubBucketBits above it (relative), and exact for small values:
+///
+///     SubBucketBits | worst relative error | exact below | memory
+///     5 (default)   | 3.1%                 | 64          | 15 KiB
+///     7             | 0.78%                | 256         | 58 KiB   e.g. per tick-to-trade stage
+///     10            | 0.098%               | 2048        | 440 KiB
+///
+/// Choose the precision your timestamps can resolve: TSC stamps carry ~10 ns of noise, so 7 bits
+/// already resolves below that up to ~1 us. record() is a few instructions and never allocates.
+/// Single-threaded: keep one per thread (and per stage) and merge() them for reports.
+template <int SubBucketBits>
+    requires(SubBucketBits >= 2 && SubBucketBits <= 10)
+class BasicLatencyHistogram {
 public:
-    static constexpr int kSubBucketBits = 5;
+    static constexpr int kSubBucketBits = SubBucketBits;
     static constexpr int kSubBuckets = 1 << kSubBucketBits;
     static constexpr int kBuckets = (64 - kSubBucketBits) * kSubBuckets + kSubBuckets;
 
@@ -51,7 +62,7 @@ public:
     [[nodiscard]] int64_t max() const noexcept { return count_ ? max_ : 0; }
     [[nodiscard]] double mean() const noexcept { return count_ ? sum_ / static_cast<double>(count_) : 0; }
 
-    void merge(const LatencyHistogram& other) noexcept {
+    void merge(const BasicLatencyHistogram& other) noexcept {
         for (int i = 0; i < kBuckets; ++i) counts_[i] += other.counts_[i];
         count_ += other.count_;
         sum_ += other.sum_;
@@ -61,7 +72,7 @@ public:
         }
     }
 
-    void reset() noexcept { *this = LatencyHistogram{}; }
+    void reset() noexcept { *this = BasicLatencyHistogram{}; }
 
 private:
     std::array<uint64_t, kBuckets> counts_{};
@@ -86,5 +97,8 @@ private:
                                                                                     : static_cast<int64_t>(upper);
     }
 };
+
+/// 3.1% precision, 15 KiB: see BasicLatencyHistogram for finer settings.
+using LatencyHistogram = BasicLatencyHistogram<5>;
 
 QUARK_END_NAMESPACE
