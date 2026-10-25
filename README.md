@@ -159,6 +159,9 @@ netmask and gateway in the `[port0]` section of `f-stack.conf`; ENA doesn't supp
 mode, so its warning at startup is expected. The F-Stack tests run by hand:
 `sudo ./tests/quark_test_fstack --conf <f-stack.conf>`.
 
+For host settings (CPU isolation, IRQs, huge pages, busy polling, real-time priority), see
+[docs/TUNING.md](docs/TUNING.md).
+
 ---
 
 ## License

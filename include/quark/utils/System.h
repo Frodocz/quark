@@ -16,7 +16,8 @@ QUARK_API bool pin_thread_to_cpu(int cpu, pthread_t thread = pthread_self());
 
 /// Real-time FIFO scheduling at `priority` (1-99). Needs CAP_SYS_NICE (or root); returns false
 /// otherwise. A busy-polling FIFO thread starves everything else on its CPU: pin it to an
-/// isolated core.
+/// isolated core. Warns when real-time throttling (kernel.sched_rt_runtime_us != -1) would pause
+/// it periodically.
 QUARK_API bool set_thread_realtime(int priority, pthread_t thread = pthread_self());
 
 /// Thread name shown by top/ps/gdb (at most 15 characters, longer names are truncated).

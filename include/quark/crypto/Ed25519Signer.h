@@ -5,12 +5,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string_view>
-
-// OpenSSL types, kept out of this header (see src/crypto/Ed25519Signer.cpp)
-struct evp_pkey_st;
-struct evp_md_ctx_st;
 
 QUARK_BEGIN_NAMESPACE
 
@@ -37,8 +34,8 @@ public:
 
     Ed25519Signer(const Ed25519Signer&) = delete;
     Ed25519Signer& operator=(const Ed25519Signer&) = delete;
-    Ed25519Signer(Ed25519Signer&& rhs) noexcept;
-    Ed25519Signer& operator=(Ed25519Signer&& rhs) noexcept;
+    Ed25519Signer(Ed25519Signer&&) noexcept;
+    Ed25519Signer& operator=(Ed25519Signer&&) noexcept;
 
     [[nodiscard]] Signature sign(std::string_view message);
 
@@ -48,10 +45,10 @@ public:
     [[nodiscard]] PublicKey public_key() const;
 
 private:
-    explicit Ed25519Signer(evp_pkey_st* pkey);
+    struct State;  // OpenSSL types, kept out of this header
+    explicit Ed25519Signer(std::unique_ptr<State> state);
 
-    evp_pkey_st* pkey_{nullptr};
-    evp_md_ctx_st* md_ctx_{nullptr};
+    std::unique_ptr<State> state_;
 };
 
 } // namespace crypto

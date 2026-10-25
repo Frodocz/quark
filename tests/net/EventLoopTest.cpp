@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <functional>
+#include <memory>
+#include <vector>
 
 using namespace quark;
 using namespace quark::net;
@@ -75,6 +77,31 @@ TEST_P(TestEventLoop, AddWhileStepping) {
     for (int i = 0; i < 3; ++i) loop.step();
     EXPECT_EQ(loop.size(), 2u);
     EXPECT_GE(b.calls, 1);
+}
+
+TEST_P(TestEventLoop, BatchLimitIsValidatedAndNothingBeyondItIsDropped) {
+    EXPECT_THROW(EventLoop({.busy_poll = GetParam(), .max_events = 0}), QuarkError);
+    EXPECT_THROW(EventLoop({.busy_poll = GetParam(), .max_events = Poller::kMaxEvents + 1}), QuarkError);
+    EXPECT_NO_THROW(EventLoop({.busy_poll = GetParam(), .max_events = Poller::kMaxEvents}));
+    EventLoop loop({.busy_poll = GetParam(), .max_events = 8});
+    std::vector<std::unique_ptr<PipePollable>> ps;
+    for (int i = 0; i < 20; ++i) {
+        ps.push_back(std::make_unique<PipePollable>());
+        ASSERT_TRUE(loop.add(*ps.back(), false));
+    }
+    for (int i = 0; i < 3; ++i) loop.step();  // 8 + 8 + 4 in epoll mode, all 20 per step in busy-poll
+    for (auto& p : ps) EXPECT_GE(p->calls, 1);
+}
+
+TEST_P(TestEventLoop, BatchesAboveTheDefault) {
+    EventLoop loop({.busy_poll = GetParam(), .max_events = 256});
+    std::vector<std::unique_ptr<PipePollable>> ps;
+    for (int i = 0; i < 200; ++i) {
+        ps.push_back(std::make_unique<PipePollable>());
+        ASSERT_TRUE(loop.add(*ps.back(), false));
+    }
+    loop.step();  // all 200 ready connections in one step, in both modes
+    for (auto& p : ps) EXPECT_EQ(p->calls, 1);
 }
 
 INSTANTIATE_TEST_SUITE_P(Modes, TestEventLoop, ::testing::Values(true, false),

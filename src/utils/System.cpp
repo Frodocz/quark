@@ -79,6 +79,15 @@ bool set_thread_realtime(int priority, pthread_t thread) {
         QUARK_LOG_ERROR("set_thread_realtime {} failed: {}", priority, std::strerror(rc));
         return false;
     }
+    // RT throttling (default 950000 of every 1000000 us) pauses a busy-polling FIFO thread for
+    // ~50 ms each second
+    std::ifstream f("/proc/sys/kernel/sched_rt_runtime_us");
+    long runtime_us = -1;
+    if (f >> runtime_us && runtime_us != -1) {
+        QUARK_LOG_WARN("real-time throttling is on (kernel.sched_rt_runtime_us={}): a busy-polling FIFO thread is "
+                       "paused every second; set it to -1",
+                       runtime_us);
+    }
     return true;
 }
 

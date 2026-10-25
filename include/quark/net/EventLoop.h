@@ -38,7 +38,10 @@ struct EventLoopConfig {
     /// connection per step on kernel sockets); false: one epoll_wait() per step reports the
     /// ready ones (cheaper with many mostly idle connections).
     bool busy_poll{true};
-    int max_events{64};          ///< poller mode: events handled per step
+    /// Poller mode: ready connections handled per step, 1..Poller::kMaxEvents (1024). Those beyond
+    /// the batch are handled in the next step (none are dropped). Larger: fewer epoll_wait() calls
+    /// under load; smaller: the step hook and timers run sooner when many connections are busy.
+    int max_events{64};
     int64_t poll_timeout_ns{0};  ///< poller mode: how long a step may block, 0 == spin
     uint32_t max_timers{256};    ///< reserved TimerQueue capacity
 };
@@ -59,6 +62,9 @@ public:
     using StepHook = InplaceFunction<void(), 64>;
 
     explicit EventLoop(const EventLoopConfig& cfg = {}) : cfg_{cfg} {
+        if (cfg_.max_events < 1 || cfg_.max_events > Poller::kMaxEvents) {
+            QUARK_THROW(QuarkError{"EventLoop: max_events must be within 1..Poller::kMaxEvents"});
+        }
         if (!cfg_.busy_poll && !poller_.valid()) {
             QUARK_THROW(QuarkError{"EventLoop: epoll_create1 failed"});
         }
@@ -115,7 +121,7 @@ public:
                 if (Pollable* p = pollables_[i]) p->on_ready(0);
             }
         } else {
-            dispatch_count_ = poller_.wait(events_, std::min(cfg_.max_events, Poller::kMaxBatch), cfg_.poll_timeout_ns);
+            dispatch_count_ = poller_.wait(events_, cfg_.max_events, cfg_.poll_timeout_ns);
             for (dispatch_idx_ = 0; dispatch_idx_ < dispatch_count_; ++dispatch_idx_) {
                 if (auto* p = static_cast<Pollable*>(events_[dispatch_idx_].token)) p->on_ready(events_[dispatch_idx_].flags);
             }
@@ -164,7 +170,7 @@ private:
     EventLoopConfig cfg_;
     Poller poller_;
     std::vector<Pollable*> pollables_;
-    ReadyEvent events_[Poller::kMaxBatch];
+    ReadyEvent events_[Poller::kMaxEvents];
     int dispatch_idx_{-1};
     int dispatch_count_{0};
     TimerQueue timers_;

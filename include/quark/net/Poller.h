@@ -36,10 +36,12 @@ struct ReadyEvent {
 /// Events beyond one wait() batch stay queued and are returned by the next wait().
 class Poller {
 public:
-    static constexpr int kMaxBatch = 64;
+    /// Most events one wait() can return: bounds its stack buffer to kMaxEvents * 12 bytes (12 KiB,
+    /// against Linux's default 8 MiB thread stacks).
+    static constexpr int kMaxEvents = 1024;
 
 #if defined(QUARK_USE_FSTACK)
-    Poller() : handle_{::ff_epoll_create(kMaxBatch)} {}
+    Poller() : handle_{::ff_epoll_create(kMaxEvents)} {}
     ~Poller() {
         if (handle_ >= 0 && fstack_active()) ::ff_close(handle_);
     }
@@ -69,8 +71,8 @@ public:
             const int64_t ms = (timeout_ns + 999'999) / 1'000'000;
             timeout_ms = ms > std::numeric_limits<int>::max() ? std::numeric_limits<int>::max() : static_cast<int>(ms);
         }
-        epoll_event evs[kMaxBatch];
-        const int n = epoll_wait(handle_, evs, max < kMaxBatch ? max : kMaxBatch, timeout_ms);
+        epoll_event evs[kMaxEvents];
+        const int n = epoll_wait(handle_, evs, max < kMaxEvents ? max : kMaxEvents, timeout_ms);
         if (n < 0) return errno == EINTR ? 0 : -1;
         for (int i = 0; i < n; ++i) {
             uint32_t f = 0;
