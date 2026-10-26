@@ -14,6 +14,7 @@
     #include <sys/ioctl.h>
 
     #include <ff_api.h>
+    #include <ff_errno.h>
 #endif
 
 #include <cerrno>
@@ -85,11 +86,23 @@ QUARK_ALWAYS_INLINE int connect(int fd, const sockaddr_in& sa) noexcept {
     return ::ff_connect(fd, reinterpret_cast<const linux_sockaddr*>(&sa), sizeof(sa)) == 0 ? 0 : -errno;
 }
 
+/// SO_ERROR holds a FreeBSD errno (F-Stack translates only the errno of failed calls): map the
+/// ones a connect can end with to their Linux values.
 QUARK_ALWAYS_INLINE int socket_error(int fd) noexcept {
     int err = 0;
     socklen_t len = sizeof(err);
     if (::ff_getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) return errno;
-    return err;
+    switch (err) {
+        case ff_ENETDOWN: return ENETDOWN;
+        case ff_ENETUNREACH: return ENETUNREACH;
+        case ff_ECONNABORTED: return ECONNABORTED;
+        case ff_ECONNRESET: return ECONNRESET;
+        case ff_ETIMEDOUT: return ETIMEDOUT;
+        case ff_ECONNREFUSED: return ECONNREFUSED;
+        case ff_EHOSTDOWN: return EHOSTDOWN;
+        case ff_EHOSTUNREACH: return EHOSTUNREACH;
+        default: return err;
+    }
 }
 
 /// ENOTCONN until the handshake completes: writing earlier fails on FreeBSD (Linux just EAGAINs).

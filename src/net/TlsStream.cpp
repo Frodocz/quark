@@ -141,6 +141,7 @@ StreamPhase TlsStream::poll_open() {
                 const int got = pump_in();
                 if (got < 0 || eof_) {
                     QUARK_LOG_WARN("TlsStream: {} closed the connection during the handshake", host_);
+                    forget_session();  // don't offer it again: it may be what the server rejects
                     fail();
                     return StreamPhase::Failed;
                 }
@@ -154,6 +155,7 @@ StreamPhase TlsStream::poll_open() {
             } else {
                 QUARK_LOG_ERROR("TlsStream: handshake with {} failed: {}", host_, detail::openssl_error_string());
             }
+            forget_session();
             fail();
             return StreamPhase::Failed;
         }
@@ -181,6 +183,9 @@ bool TlsStream::flush_out() noexcept {
     }
 }
 
+// A short read means the socket had no more at that moment: stop there instead of paying one
+// more recv() for the -EAGAIN. read() only reports -EAGAIN after a recv() did, so edge-triggered
+// callers still drain the socket.
 int TlsStream::pump_in() noexcept {
     alignas(64) thread_local uint8_t buf[16 * 1024];
     int moved = 0;
@@ -189,6 +194,7 @@ int TlsStream::pump_in() noexcept {
         if (r > 0) {
             ::BIO_write(rbio_, buf, static_cast<int>(r));
             moved += static_cast<int>(r);
+            if (static_cast<std::size_t>(r) < sizeof(buf)) break;
         } else if (r == -EAGAIN) {
             break;
         } else if (r == 0) {
@@ -261,6 +267,22 @@ sys::io_result TlsStream::write(std::span<const uint8_t> src, bool /*more*/) noe
         return -EIO;
     }
     return n;
+}
+
+sys::io_result TlsStream::flush_staged() noexcept {
+    if (phase_ != Phase::Established && phase_ != Phase::Handshaking) return 0;  // nothing to send any more
+    if (!flush_out()) {
+        fail();
+        return -EIO;
+    }
+    return wants_write() ? -EAGAIN : 0;
+}
+
+void TlsStream::forget_session() noexcept {
+    if (session_ != nullptr) {
+        ::SSL_SESSION_free(session_);
+        session_ = nullptr;
+    }
 }
 
 std::size_t TlsStream::pending_ciphertext() const noexcept {

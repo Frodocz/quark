@@ -43,8 +43,14 @@ public:
 
     // ---------------------------------------------------------------- Stream
 
-    bool connect(const Endpoint& remote) {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD bool connect(const Endpoint& remote) {
         close();
+        if (!remote.valid()) {
+            // 0.0.0.0 would reach this host: an unresolved endpoint must not connect anywhere
+            QUARK_LOG_ERROR("TcpSocket: connect to an unset address ({})", remote.to_string());
+            state_ = State::Failed;
+            return false;
+        }
         const int fd = sys::tcp_socket();
         if (fd < 0) {
             QUARK_LOG_ERROR("TcpSocket: socket() failed: {}", std::strerror(-fd));
@@ -86,8 +92,8 @@ public:
         switch (state_) {
             case State::Connected: return StreamPhase::Open;
             case State::Failed: return StreamPhase::Failed;
-            case State::Closed: return StreamPhase::Closed;
-            default: return StreamPhase::Connecting;
+            case State::Connecting: return StreamPhase::Connecting;
+            default: return StreamPhase::Closed;  // Idle (never connected) or Closed
         }
     }
 
@@ -99,6 +105,10 @@ public:
     QUARK_ALWAYS_INLINE sys::io_result write(std::span<const uint8_t> src, bool more) noexcept {
         return sys::send(fd_, src.data(), src.size(), more);
     }
+
+    /// Nothing is buffered here: every write goes straight to the socket.
+    [[nodiscard]] static constexpr bool wants_write() noexcept { return false; }
+    static constexpr sys::io_result flush() noexcept { return 0; }
 
     void close() noexcept {
         if (fd_ >= 0) {
@@ -119,7 +129,7 @@ private:
     State state_{State::Idle};
     uint32_t local_ip_be_{0};
 
-    void fail() noexcept {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void fail() noexcept {
         sys::close(fd_);
         fd_ = -1;
         state_ = State::Failed;

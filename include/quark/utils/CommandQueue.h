@@ -24,12 +24,23 @@ public:
 
     /// Producer thread: queues `fn`. False if the queue is full (the consumer is falling behind).
     template <class F>
-    bool post(F&& fn) {
+    QUARK_ALWAYS_INLINE bool post(F&& fn) {
         return queue_->tryPush([&](Command* slot) { *slot = Command(std::forward<F>(fn)); });
     }
 
     /// Consumer thread: runs up to `max` queued commands in order. Returns how many ran.
-    std::size_t drain(std::size_t max = static_cast<std::size_t>(-1)) {
+    /// A producer that keeps up can hold an unbounded drain() forever: in a step hook pass a
+    /// bound (e.g. Size). Commands must not throw. A drain() from inside a command returns 0
+    /// (the running command still owns its slot, a nested drain would run it again).
+    QUARK_ATTRIBUTE_HOT std::size_t drain(std::size_t max = static_cast<std::size_t>(-1)) {
+        if (draining_) [[unlikely]] {
+            return 0;
+        }
+        draining_ = true;
+        struct Reset {
+            bool& flag;
+            ~Reset() { flag = false; }
+        } reset{draining_};
         std::size_t n = 0;
         while (n < max && queue_->tryPop([](Command* cmd) {
             (*cmd)();
@@ -43,6 +54,7 @@ public:
 private:
     using Queue = SPSCQueue<Command, Size>;
     std::unique_ptr<Queue> queue_;  // Size * sizeof(Command) bytes: kept off the stack
+    bool draining_{false};          // consumer thread only
 };
 
 QUARK_END_NAMESPACE

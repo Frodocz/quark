@@ -51,6 +51,7 @@ struct WsSessionOptions {
     int64_t ping_interval_ns{0};                 ///< 0: no client pings
     int64_t pong_timeout_ns{0};                  ///< 0: pings without a deadline
     int64_t max_recv_gap_ns{0};                  ///< 0: no receive gap check
+    int64_t close_timeout_ns{1'000'000'000};     ///< close(): how long queued frames may take to go out
 };
 
 /// WebSocket client (RFC 6455) over any Stream: WsSession<TcpSocket> is ws://, WsSession<TlsStream>
@@ -71,7 +72,7 @@ struct WsSessionOptions {
 /// - Keepalive: optional client pings with a pong timeout, and/or a maximum gap between received
 ///   bytes; either failing reconnects.
 ///
-/// Callbacks may call send() and close(), but must not destroy the session.
+/// Callbacks may call send(), close() and connect(), but must not destroy the session.
 template <Stream Transport>
 class WsSession final : public Pollable {
 public:
@@ -125,7 +126,7 @@ public:
     // ---------------------------------------------------------------- control
 
     /// Connects (or reconnects right away) to `ep`; later automatic reconnects go to `ep` too.
-    void connect(const Endpoint& ep) {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void connect(const Endpoint& ep) {
         ep_ = ep;
         user_closed_ = false;
         cancel_timer(reconnect_timer_);
@@ -133,26 +134,47 @@ public:
         start_connect();
     }
 
-    /// Sends a Close frame and disconnects; no automatic reconnect after this.
-    void close(uint16_t code = 1000) {
+    /// Sends a Close frame and disconnects once the queued frames are out (at most
+    /// close_timeout_ns later); no automatic reconnect after this.
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void close(uint16_t code = 1000) {
         user_closed_ = true;
         cancel_timer(reconnect_timer_);
         if (state_ == State::Open) {
+            const uint32_t gen = conn_gen_;
             const uint8_t body[2] = {static_cast<uint8_t>(code >> 8), static_cast<uint8_t>(code & 0xFF)};
-            (void)enqueue_frame(WsOpcode::Close, body);
+            if (enqueue_frame(WsOpcode::Close, body) != SendStatus::Ok) {
+                // queue or pool full (the peer isn't reading): the Close frame is best effort
+                if (gen == conn_gen_) teardown(false, true);
+                return;
+            }
+            if (gen != conn_gen_) return;  // the write failed and tore the connection down
             set_state(State::Closing);
-            if (pending_count_ == 0) teardown(false, true);
+            if (gen != conn_gen_ || state_ != State::Closing) return;  // the callback reconnected
+            if (pending_count_ == 0 && !transport_.wants_write()) {
+                teardown(false, true);
+            } else if (opts_.close_timeout_ns > 0) {
+                close_timer_ = loop_.timers().add_task("ws_close_timeout", [this] {
+                    close_timer_ = kInvalidTimerId;
+                    if (state_ == State::Closing) {
+                        QUARK_LOG_WARN("ws {}: close timed out with {} frames queued", host_, pending_count_);
+                        teardown(false, true);
+                    }
+                    return false;
+                }, loop_.now_ns() + opts_.close_timeout_ns);
+            }
         } else if (state_ != State::Disconnected) {
             teardown(false, true);
         }
     }
 
-    [[nodiscard]] SendStatus send_text(std::string_view text) {
+    [[nodiscard]] QUARK_ALWAYS_INLINE SendStatus send_text(std::string_view text) {
         return send({reinterpret_cast<const uint8_t*>(text.data()), text.size()}, WsOpcode::Text);
     }
-    [[nodiscard]] SendStatus send_binary(std::span<const uint8_t> data) { return send(data, WsOpcode::Binary); }
+    [[nodiscard]] QUARK_ALWAYS_INLINE SendStatus send_binary(std::span<const uint8_t> data) {
+        return send(data, WsOpcode::Binary);
+    }
 
-    [[nodiscard]] SendStatus send(std::span<const uint8_t> payload, WsOpcode opcode) {
+    [[nodiscard]] QUARK_ALWAYS_INLINE SendStatus send(std::span<const uint8_t> payload, WsOpcode opcode) {
         if (state_ != State::Open) [[unlikely]] return SendStatus::NotOpen;
         return enqueue_frame(opcode, payload);
     }
@@ -169,13 +191,14 @@ public:
 
     [[nodiscard]] int fd() const noexcept override { return transport_.fd(); }
 
-    void on_ready(uint32_t /*flags*/) override {
+    QUARK_ATTRIBUTE_HOT void on_ready(uint32_t /*flags*/) override {
+        const uint32_t gen = conn_gen_;  // changes if a callback below tears down (and reconnects)
         switch (state_) {
             case State::Connecting: {
                 const StreamPhase ph = transport_.poll_open();
                 if (ph == StreamPhase::Open) {
                     set_state(State::Upgrading);
-                    send_upgrade_request();
+                    if (gen == conn_gen_) send_upgrade_request();
                 } else if (ph != StreamPhase::Connecting) {
                     QUARK_LOG_WARN("ws {}: connect to {} failed", host_, ep_.to_string());
                     teardown(true, true);
@@ -184,12 +207,12 @@ public:
             }
             case State::Upgrading:
                 send_upgrade_request();
-                if (registered_) read_input();
+                if (gen == conn_gen_) read_input();
                 return;
             case State::Open:
             case State::Closing:
                 flush_pending();
-                if (registered_) read_input();
+                if (gen == conn_gen_) read_input();
                 return;
             case State::Disconnected: return;
         }
@@ -210,6 +233,7 @@ private:
     bool registered_{false};
     bool write_armed_{false};
     bool user_closed_{false};
+    uint32_t conn_gen_{0};  // bumped by every teardown: callbacks may end or replace the connection
 
     Endpoint ep_;
     std::string host_;
@@ -238,13 +262,14 @@ private:
     TimerId connect_timer_{};
     TimerId reconnect_timer_{};
     TimerId health_timer_{};
+    TimerId close_timer_{};
 
     MessageHandler on_message_;
     StateHandler on_state_;
 
     // ---------------------------------------------------------------- connection lifecycle
 
-    void start_connect() {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void start_connect() {
         if (!recv_ && !(recv_ = recv_pool_.acquire())) {
             QUARK_LOG_ERROR("ws {}: no receive buffer available", host_);
             schedule_reconnect();
@@ -288,7 +313,7 @@ private:
         }
     }
 
-    void send_upgrade_request() {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void send_upgrade_request() {
         while (request_off_ < request_.size()) {
             const std::span<const uint8_t> rest{reinterpret_cast<const uint8_t*>(request_.data()) + request_off_,
                                                 request_.size() - request_off_};
@@ -303,10 +328,27 @@ private:
             }
             request_off_ += static_cast<std::size_t>(n);
         }
-        set_write_interest(false);
+        (void)flush_transport();
     }
 
-    void on_upgraded() {
+    /// Sends what the transport buffered itself and updates write interest: armed until all of
+    /// it is out. False if the connection failed (torn down).
+    bool flush_transport() {
+        const sys::io_result f = transport_.flush();
+        if (f == -EAGAIN) {
+            set_write_interest(true);
+            return true;
+        }
+        if (f < 0) {
+            QUARK_LOG_WARN("ws {}: write failed", host_);
+            teardown(true, true);
+            return false;
+        }
+        set_write_interest(false);
+        return true;
+    }
+
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void on_upgraded() {
         cancel_timer(connect_timer_);
         opened_at_ns_ = loop_.now_ns();
         awaiting_pong_ = false;
@@ -342,7 +384,8 @@ private:
 
     /// Closes the connection. `reconnect`: schedule an automatic reconnect (unless closed by the
     /// user); `notify`: report State::Disconnected.
-    void teardown(bool reconnect, bool notify) {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void teardown(bool reconnect, bool notify) {
+        ++conn_gen_;
         if (registered_) {
             loop_.remove(*this);  // before the fd is closed
             registered_ = false;
@@ -357,6 +400,7 @@ private:
         recv_pool_.release(frag_);
         cancel_timer(connect_timer_);
         cancel_timer(health_timer_);
+        cancel_timer(close_timer_);
         awaiting_pong_ = false;
         const bool was_stable = opened_at_ns_ != 0 && loop_.now_ns() - opened_at_ns_ >= opts_.stable_after_ns;
         opened_at_ns_ = 0;
@@ -368,7 +412,7 @@ private:
         if (reconnect && state_ == State::Disconnected) schedule_reconnect();
     }
 
-    void schedule_reconnect() {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void schedule_reconnect() {
         if (!opts_.auto_reconnect || user_closed_ || reconnect_timer_) return;
         const int64_t delay = backoff_.next_delay_ns();
         QUARK_LOG_INFO("ws {}: reconnecting to {} in {} ms (attempt {})", host_, ep_.to_string(), delay / 1'000'000,
@@ -412,7 +456,8 @@ private:
 
     /// Reads until the transport has nothing more, which both busy-poll and edge-triggered
     /// modes rely on.
-    void read_input() {
+    QUARK_ATTRIBUTE_HOT void read_input() {
+        const uint32_t gen = conn_gen_;
         for (;;) {
             std::span<uint8_t> space = readable_space(recv_);
             if (space.empty() && recv_.headroom() > 0) {
@@ -441,12 +486,12 @@ private:
                 if (!process_upgrade_response()) return;
             }
             parse_frames();
-            if (!registered_) return;  // torn down while handling the input
+            if (gen != conn_gen_) return;  // torn down (maybe reconnected) while handling the input
         }
     }
 
     /// False if the connection was closed.
-    bool process_upgrade_response() {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD bool process_upgrade_response() {
         const WsUpgradeResponse r = parse_ws_upgrade_response(recv_.bytes(), key_.accept_view());
         if (!r.complete) return true;
         last_upgrade_status_ = r.status;
@@ -455,12 +500,14 @@ private:
             teardown(true, true);
             return false;
         }
+        const uint32_t gen = conn_gen_;
         recv_.consume(r.header_len);
         on_upgraded();
-        return registered_;
+        return gen == conn_gen_;
     }
 
-    void parse_frames() {
+    QUARK_ATTRIBUTE_HOT void parse_frames() {
+        const uint32_t gen = conn_gen_;
         while (state_ == State::Open || state_ == State::Closing) {
             const std::span<const uint8_t> buf = recv_.bytes();
             WsFrameHeader hdr;
@@ -480,7 +527,7 @@ private:
             const std::size_t total = hlen + static_cast<std::size_t>(hdr.payload_len);
             if (buf.size() < total) break;
             dispatch(hdr, buf.subspan(hlen, total - hlen));
-            if (!registered_) return;
+            if (gen != conn_gen_) return;  // recv_ may belong to a new connection now
             recv_.consume(total);
         }
         if (recv_.empty()) recv_.reset();
@@ -533,8 +580,9 @@ private:
         }
         if (!chunk.empty()) std::memcpy(frag_.append(chunk.size()).data(), chunk.data(), chunk.size());
         if (fin) {
+            const uint32_t gen = conn_gen_;
             deliver(frag_opcode_, frag_.bytes(), capacity_from(frag_, frag_.data()));
-            recv_pool_.release(frag_);
+            if (gen == conn_gen_) recv_pool_.release(frag_);  // else teardown released it already
         }
     }
 
@@ -542,14 +590,14 @@ private:
         if (on_message_) on_message_(Message{op, payload, capacity, recv_ns_});
     }
 
-    void protocol_error(const char* what) {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void protocol_error(const char* what) {
         QUARK_LOG_WARN("ws {}: protocol error: {}", host_, what);
         teardown(true, true);
     }
 
     // ---------------------------------------------------------------- send
 
-    SendStatus enqueue_frame(WsOpcode opcode, std::span<const uint8_t> payload) {
+    QUARK_ATTRIBUTE_HOT SendStatus enqueue_frame(WsOpcode opcode, std::span<const uint8_t> payload) {
         const std::size_t hsize = ws_client_header_size(payload.size());
         if (hsize + payload.size() > send_pool_.buffer_size()) return SendStatus::TooLarge;
         if (pending_count_ == kMaxPendingFrames) return SendStatus::WouldBlock;
@@ -565,14 +613,16 @@ private:
         (void)ws_encode_client_header(b.prepend(hsize), opcode, payload.size(), key_bytes, true);
 
         Pending& slot = pending_[(pending_head_ + pending_count_) % kMaxPendingFrames];
-        slot.buf = b;
+        slot.buf = std::move(b);
         slot.sent = 0;
         ++pending_count_;
         flush_pending();
         return SendStatus::Ok;
     }
 
-    void flush_pending() {
+    /// Writes queued frames until the transport answers -EAGAIN (only that guarantees another
+    /// writable edge: a partial write, e.g. one TLS record of a larger frame, is retried at once).
+    QUARK_ATTRIBUTE_HOT void flush_pending() {
         while (pending_count_ > 0) {
             Pending& p = pending_[pending_head_];
             const sys::io_result n = transport_.write({p.buf.data() + p.sent, p.buf.size() - p.sent}, false);
@@ -586,16 +636,13 @@ private:
                 return;
             }
             p.sent += static_cast<std::size_t>(n);
-            if (p.sent < p.buf.size()) {
-                set_write_interest(true);
-                return;
-            }
+            if (p.sent < p.buf.size()) continue;
             send_pool_.release(p.buf);
             pending_head_ = (pending_head_ + 1) % kMaxPendingFrames;
             --pending_count_;
         }
-        set_write_interest(false);
-        if (state_ == State::Closing) teardown(false, true);
+        if (!flush_transport()) return;
+        if (state_ == State::Closing && !transport_.wants_write()) teardown(false, true);
     }
 };
 

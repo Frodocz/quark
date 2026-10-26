@@ -1,5 +1,7 @@
 #include "quark/QuarkConfig.h"
-#include "quark/QuarkLog.h"
+
+#include <cstdio>
+#include <string>
 
 #include "toml++/toml.hpp"
 
@@ -65,13 +67,19 @@ QuarkConfig::~QuarkConfig() = default;
 QuarkConfig::QuarkConfig(QuarkConfig&& other) noexcept = default;
 QuarkConfig& QuarkConfig::operator=(QuarkConfig&& other) noexcept = default;
 
+// Errors go to stderr, not the logger: configuration is loaded before init_log() (which it
+// usually configures), when nothing would print a log record yet, and logging would create the
+// quark logger with default sinks before the configuration could set them.
 std::optional<QuarkConfig> QuarkConfig::load_file(std::string_view file_path) noexcept {
     return QuarkConfigImpl::load([&] { return toml::parse_file(file_path); }, [&](const toml::parse_error* e) {
+        const std::string path{file_path};
         if (e) {
-            QUARK_LOG_WARN("failed to load config file {}:{}:{}: {}", file_path, e->source().begin.line,
-                           e->source().begin.column, e->description());
+            const std::string what{e->description()};
+            std::fprintf(stderr, "quark: failed to load config file %s:%u:%u: %s\n", path.c_str(),
+                         static_cast<unsigned>(e->source().begin.line), static_cast<unsigned>(e->source().begin.column),
+                         what.c_str());
         } else {
-            QUARK_LOG_WARN("failed to load config file {}", file_path);
+            std::fprintf(stderr, "quark: failed to load config file %s\n", path.c_str());
         }
     });
 }
@@ -79,10 +87,12 @@ std::optional<QuarkConfig> QuarkConfig::load_file(std::string_view file_path) no
 std::optional<QuarkConfig> QuarkConfig::load_string(std::string_view str) noexcept {
     return QuarkConfigImpl::load([&] { return toml::parse(str); }, [&](const toml::parse_error* e) {
         if (e) {
-            QUARK_LOG_WARN("failed to parse config string at {}:{}: {}", e->source().begin.line,
-                           e->source().begin.column, e->description());
+            const std::string what{e->description()};
+            std::fprintf(stderr, "quark: failed to parse config string at %u:%u: %s\n",
+                         static_cast<unsigned>(e->source().begin.line), static_cast<unsigned>(e->source().begin.column),
+                         what.c_str());
         } else {
-            QUARK_LOG_WARN("failed to parse config string");
+            std::fprintf(stderr, "quark: failed to parse config string\n");
         }
     });
 }

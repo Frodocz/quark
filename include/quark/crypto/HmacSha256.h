@@ -31,10 +31,10 @@ public:
     HmacSha256(HmacSha256&&) noexcept;
     HmacSha256& operator=(HmacSha256&&) noexcept;
 
-    [[nodiscard]] Digest sign(std::string_view data);
+    [[nodiscard]] QUARK_ATTRIBUTE_HOT Digest sign(std::string_view data);
 
     /// Lowercase hex digest (64 chars) into `out`. Returns the length, or 0 if `out` is too small.
-    std::size_t sign_hex(std::string_view data, std::span<char> out);
+    QUARK_ATTRIBUTE_HOT std::size_t sign_hex(std::string_view data, std::span<char> out);
 
     /// Base64 digest (44 chars) into `out`. Returns the length, or 0 if `out` is too small.
     std::size_t sign_base64(std::string_view data, std::span<char> out);

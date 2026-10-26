@@ -114,7 +114,11 @@ LogOptions LogOptions::load_from_config(const QuarkConfig& cfg, std::string_view
     assign(cfg, key("to_console"), options.to_console);
     assign(cfg, key("to_rotating_file"), options.to_rotating_file);
     if (auto level = cfg.get<std::string>(key("level"))) {
-        options.level = quill::loglevel_from_string(*level);
+        QUARK_TRY {
+            options.level = quill::loglevel_from_string(*level);
+        } QUARK_CATCH(const std::exception& e) {
+            QUARK_THROW(QuarkError{key("level") + ": " + e.what()});
+        }
     }
     assign(cfg, key("pattern"), options.pattern);
     assign(cfg, key("filename"), options.filename);
@@ -180,13 +184,21 @@ bool init_log(const LogConfig& config) {
         ctx.initialized = true;
         ctx.config = config;
 
-        for (const auto& [name, options] : config.loggers) {
-            if (Logger* logger = Frontend::get_logger(name)) {
-                logger->set_log_level(options.level);
-                created_early.push_back(name);
-            } else {
-                (void)create_logger_locked(ctx, name);
+        QUARK_TRY {
+            for (const auto& [name, options] : config.loggers) {
+                if (Logger* logger = Frontend::get_logger(name)) {
+                    logger->set_log_level(options.level);
+                    created_early.push_back(name);
+                } else {
+                    (void)create_logger_locked(ctx, name);  // throws on bad sink options
+                }
             }
+        } QUARK_CATCH_ALL() {
+            // undo, so a corrected configuration can be retried
+            if (!backend_taken && !config.backend.manual_backend) quill::Backend::stop();
+            ctx.initialized = false;
+            ctx.config = LogConfig{};
+            QUARK_RETHROW;
         }
     }
 

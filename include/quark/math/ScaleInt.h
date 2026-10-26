@@ -29,6 +29,7 @@
 #include <cassert>
 #include <charconv>
 #include <compare>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -57,10 +58,29 @@ struct ScaleInt;
 template <int SCALE>
 class TickSize {
 public:
-    // tick must be at least one unit of ScaleInt<SCALE> (asserts in debug builds)
+    // tick must be at least one unit of ScaleInt<SCALE> (asserts in debug builds). In release
+    // builds a tick below one unit becomes one unit, so rounding leaves values unchanged (as the
+    // per-call double overloads do) instead of dividing by zero. Use try_from_double() for ticks
+    // read from configuration or an exchange.
     constexpr explicit TickSize(double tick) noexcept : TickSize(ScaleInt<SCALE>::tick_to_raw(tick), Raw{}) {}
 
     [[nodiscard]] static constexpr TickSize from_raw(int64_t tick_raw) noexcept { return TickSize(tick_raw, Raw{}); }
+
+    // Checked conversion: false when the tick is not finite, not positive, finer than one unit of
+    // this scale, or not a whole number of units (1.5e-8 at E8 would silently become 1e-8).
+    [[nodiscard]] static constexpr bool try_from_double(double tick, TickSize& out) noexcept {
+        if (!(tick > 0.0 && tick < ScaleInt<SCALE>::MAX_ABS_DOUBLE)) {  // written so NaN fails
+            return false;
+        }
+        const double scaled = tick * ScaleInt<SCALE>::SCALE_AS_DOUBLE;
+        const int64_t raw = ScaleInt<SCALE>::to_raw(tick);
+        // a tick parsed from decimal text scales to within a few ulps of a whole number
+        if (raw <= 0 || math::abs(scaled - static_cast<double>(raw)) > 1e-6 * math::max(scaled, 1.0)) {
+            return false;
+        }
+        out = TickSize(raw, Raw{});
+        return true;
+    }
 
     [[nodiscard]] constexpr int64_t raw() const noexcept { return raw_; }
 
@@ -78,7 +98,8 @@ public:
 private:
     struct Raw {};
 
-    constexpr TickSize(int64_t tick_raw, Raw) noexcept : raw_(tick_raw), pow10_exponent_(exact_log10(tick_raw)) {
+    constexpr TickSize(int64_t tick_raw, Raw) noexcept
+        : raw_(tick_raw > 0 ? tick_raw : 1), pow10_exponent_(exact_log10(raw_)) {
         assert(tick_raw > 0 && "tick must be positive and at least one unit of this scale");
     }
 
@@ -128,11 +149,14 @@ public:
         return ret;
     }
 
-    // Round to nearest unit, ties away from zero. Branch-free (compare + select); no tolerance
-    // check is needed, anything closer to zero than half a unit rounds to 0 anyway.
+    // Round to nearest unit, ties away from zero (llround of the scaled value), branch-free.
+    // Adds the largest double below 0.5, then truncates: adding 0.5 itself would round twice
+    // (0.49999999999999994 + 0.5 is 1.0, and an odd integer in [2^52, 2^53) plus 0.5 rounds up
+    // to the next even one), while exact ties still reach the next integer.
     [[nodiscard]] static constexpr int64_t to_raw(double v) noexcept {
         assert(math::abs(v) < MAX_ABS_DOUBLE && "not finite or out of range");  // NaN fails too
-        return static_cast<int64_t>(v * SCALE_AS_DOUBLE + (v < 0.0 ? -0.5 : 0.5));
+        constexpr double kJustBelowHalf = 0.49999999999999994;  // nextafter(0.5, 0)
+        return static_cast<int64_t>(v * SCALE_AS_DOUBLE + (v < 0.0 ? -kJustBelowHalf : kJustBelowHalf));
     }
 
     // Checked conversion for untrusted input: NaN, inf and out of range values return false.
@@ -249,19 +273,19 @@ public:
     }
 
     // Convenience overloads converting the tick on every call. A tick that is finer than this
-    // type's resolution (or not positive) leaves the value unchanged instead of dividing by zero.
+    // type's resolution, not positive, not finite or too large leaves the value unchanged.
     constexpr SelfT& round_to_tick(double tick) noexcept {
-        const int64_t tick_raw = to_raw(tick);
+        const int64_t tick_raw = checked_tick_raw(tick);
         return tick_raw > 0 ? round_to_tick_raw(tick_raw) : *this;
     }
 
     constexpr SelfT& floor_to_tick(double tick) noexcept {
-        const int64_t tick_raw = to_raw(tick);
+        const int64_t tick_raw = checked_tick_raw(tick);
         return tick_raw > 0 ? floor_to_tick_raw(tick_raw) : *this;
     }
 
     constexpr SelfT& ceil_to_tick(double tick) noexcept {
-        const int64_t tick_raw = to_raw(tick);
+        const int64_t tick_raw = checked_tick_raw(tick);
         return tick_raw > 0 ? ceil_to_tick_raw(tick_raw) : *this;
     }
 
@@ -275,6 +299,11 @@ public:
     [[nodiscard]] constexpr SelfT operator-() const noexcept { return from_raw(sub_raw(0, v_)); }
     [[nodiscard]] constexpr SelfT operator*(int64_t k) const noexcept { return from_raw(mul_raw(v_, k)); }
     [[nodiscard]] friend constexpr SelfT operator*(int64_t k, const SelfT x) noexcept { return x * k; }
+    // would silently truncate the factor to an integer (px * 1.5 == px); scale explicitly instead
+    template <std::floating_point F>
+    SelfT operator*(F) const = delete;
+    template <std::floating_point F>
+    friend SelfT operator*(F, const SelfT) = delete;
 
     constexpr SelfT& operator+=(const SelfT rhs) noexcept {
         v_ = add_raw(v_, rhs.v_);
@@ -346,6 +375,11 @@ public:
     }
 
 private:
+    // 0 unless |tick| converts without overflow (NaN fails the comparison too)
+    static constexpr int64_t checked_tick_raw(double tick) noexcept {
+        return math::abs(tick) < MAX_ABS_DOUBLE ? to_raw(tick) : 0;
+    }
+
     // Overflow asserts in debug builds and wraps in release (never UB); a plain add/sub/imul.
     static constexpr int64_t add_raw(int64_t a, int64_t b) noexcept {
         int64_t out = 0;

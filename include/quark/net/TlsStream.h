@@ -32,7 +32,10 @@ namespace net {
 /// - read() returns -EAGAIN only when neither OpenSSL nor the socket has anything left, which is
 ///   what an edge-triggered poller needs.
 /// - write() never reads the socket: no extra syscall on the send path.
-/// - The session of the last connection is kept and resumed on the next connect().
+/// - wants_write() reports staged ciphertext: with an edge-triggered poller keep write interest
+///   while it is true and call flush() on the writable edge, or it waits for the next write().
+/// - The session of the last connection is kept and resumed on the next connect() (to the same
+///   host and context; a failed handshake forgets it).
 ///
 /// Not movable (OpenSSL callbacks point back to it).
 class QUARK_API TlsStream {
@@ -47,23 +50,32 @@ public:
 
     // ---------------------------------------------------------------- configuration (cold path)
 
-    void set_context(TlsContext& ctx) noexcept { ctx_ = &ctx; }
+    void set_context(TlsContext& ctx) noexcept {
+        if (ctx_ != &ctx) forget_session();
+        ctx_ = &ctx;
+    }
     /// SNI and certificate verification target: the server's DNS name (or IP literal). Required
     /// when the context verifies peers.
-    void set_hostname(std::string_view host) { host_.assign(host); }
+    void set_hostname(std::string_view host) {
+        if (host != host_) forget_session();  // a session is only valid for the host it came from
+        host_.assign(host);
+    }
     /// The underlying socket, e.g. for set_local_ip() or buffer sizes.
     [[nodiscard]] TcpSocket& tcp() noexcept { return tcp_; }
 
     // ---------------------------------------------------------------- Stream
 
-    bool connect(const Endpoint& remote);
-    StreamPhase poll_open();
+    QUARK_ATTRIBUTE_COLD bool connect(const Endpoint& remote);
+    QUARK_ATTRIBUTE_COLD StreamPhase poll_open();
     [[nodiscard]] int fd() const noexcept { return tcp_.fd(); }
     [[nodiscard]] bool closed() const noexcept { return phase_ == Phase::Closed || phase_ == Phase::Failed || phase_ == Phase::Idle; }
-    sys::io_result read(std::span<uint8_t> dst) noexcept;
-    sys::io_result write(std::span<const uint8_t> src, bool more) noexcept;
+    QUARK_ATTRIBUTE_HOT sys::io_result read(std::span<uint8_t> dst) noexcept;
+    QUARK_ATTRIBUTE_HOT sys::io_result write(std::span<const uint8_t> src, bool more) noexcept;
+    /// Staged ciphertext the socket didn't take yet (see the class comment).
+    [[nodiscard]] bool wants_write() const noexcept { return out_off_ != out_len_; }
+    QUARK_ALWAYS_INLINE sys::io_result flush() noexcept { return wants_write() ? flush_staged() : 0; }
     /// Sends close_notify (best effort) and closes the socket.
-    void close() noexcept;
+    QUARK_ATTRIBUTE_COLD void close() noexcept;
 
     // ---------------------------------------------------------------- introspection
 
@@ -72,16 +84,18 @@ public:
     /// Whether the last handshake resumed a previous session.
     [[nodiscard]] bool session_resumed() const noexcept { return resumed_; }
     /// Negotiated protocol and cipher, e.g. "TLSv1.3 TLS_AES_128_GCM_SHA256", once open.
-    [[nodiscard]] std::string description() const;
+    [[nodiscard]] QUARK_ATTRIBUTE_COLD std::string description() const;
 
 private:
     friend struct TlsStreamAccess;
     enum class Phase : uint8_t { Idle, ConnectingTcp, Handshaking, Established, Closed, Failed };
 
-    bool begin_handshake();
-    bool flush_out() noexcept;  // false on a dead socket
-    int pump_in() noexcept;     // bytes moved into rbio, 0 if none, -1 on a dead socket
-    void fail() noexcept;
+    QUARK_ATTRIBUTE_COLD bool begin_handshake();
+    QUARK_ATTRIBUTE_HOT sys::io_result flush_staged() noexcept;
+    QUARK_ATTRIBUTE_COLD void forget_session() noexcept;
+    QUARK_ATTRIBUTE_HOT bool flush_out() noexcept;  // false on a dead socket
+    QUARK_ATTRIBUTE_HOT int pump_in() noexcept;     // bytes moved into rbio, 0 if none, -1 on a dead socket
+    QUARK_ATTRIBUTE_COLD void fail() noexcept;
     void release_ssl() noexcept;
 
     TcpSocket tcp_;

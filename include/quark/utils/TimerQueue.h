@@ -5,12 +5,14 @@
 #include "quark/utils/InplaceFunction.h"
 #include "quark/utils/RdtscClock.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
-#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -39,7 +41,11 @@ inline constexpr TimerId kInvalidTimerId{};
 /// - Tasks due at the same time fire in scheduling order (FIFO).
 /// - Repeating tasks are fixed-rate: the next fire time is when + k * interval, the
 ///   first such slot strictly after now. Ticks missed by a late poll are skipped,
-///   not replayed in a burst, and the schedule does not drift.
+///   not replayed in a burst, and the schedule does not drift. A repeating task whose next
+///   slot would be past INT64_MAX stops.
+/// - A task added from a callback and already due runs in the next poll(), not the current
+///   one, so a callback rescheduling itself "now" cannot keep poll() from returning.
+/// - Names are for the slow-task warning only: copied, truncated to kMaxNameLength.
 ///
 /// Callbacks return true to keep a repeating task alive, false to stop it (ignored for
 /// one-shot tasks). Callbacks must not throw. They are stored inline (no allocation): a callable
@@ -50,6 +56,7 @@ public:
     using Callback = InplaceFunction<bool(), kCallbackCapacity>;
 
     static constexpr int64_t MIN_REPEAT_INTERVAL_NS = 2'000;  // 2us
+    static constexpr std::size_t kMaxNameLength = 31;
 
     TimerQueue() {
         // RdtscClock calibrates on first use (~20ms): pay that here, not in the first poll()
@@ -62,7 +69,7 @@ public:
     void set_slow_task_threshold(int64_t interval_ns) noexcept { slow_task_threshold_ns_ = interval_ns; }
 
     /// Pre-allocates room for `n` live timers so add_task() does not allocate on the hot path.
-    void reserve(uint32_t n) {
+    QUARK_ATTRIBUTE_COLD void reserve(uint32_t n) {
         heap_.reserve(n);
         while (slot_capacity() < n) {
             chunks_.push_back(std::make_unique<Node[]>(kChunkSize));
@@ -71,7 +78,7 @@ public:
 
     /// Schedules `cb` at absolute time `when` (ns), repeating every `repeat_interval_ns`
     /// if given. Returns kInvalidTimerId if the arguments are rejected.
-    TimerId add_task(std::string name, Callback cb, int64_t when,
+    QUARK_ATTRIBUTE_HOT TimerId add_task(std::string_view name, Callback cb, int64_t when,
                      std::optional<int64_t> repeat_interval_ns = {}) {
         if (when < 0) [[unlikely]] {
             QUARK_LOG_ERROR("bad timeTask:{}, when:{} < 0", name, when);
@@ -94,12 +101,22 @@ public:
             }
         }
 
+        if (heap_.size() == heap_.capacity()) [[unlikely]] {
+            // grow before taking a slot, so a failed allocation leaks nothing
+            heap_.reserve(std::max<std::size_t>(16, heap_.capacity() * 2));
+        }
+        // due already while poll() runs: defer to the next poll()
+        if (when <= polling_now_ns_ && polling_now_ns_ < std::numeric_limits<int64_t>::max()) {
+            when = polling_now_ns_ + 1;
+        }
         const uint32_t slot = alloc_slot();
         Node& n = node(slot);
         n.cb = std::move(cb);
         n.interval_ns = repeat_interval_ns.value_or(0);
         n.state = State::Pending;
-        n.name = std::move(name);
+        const std::size_t len = std::min(name.size(), kMaxNameLength);
+        std::memcpy(n.name, name.data(), len);
+        n.name[len] = '\0';
         n.uid = next_uid_++;
         heap_push(Entry{when, seq_++, slot});
         return TimerId{n.uid, slot};
@@ -107,7 +124,7 @@ public:
 
     /// Cancels a pending timer. Safe to call from any callback, including the timer's own.
     /// Returns false if the id is unknown, already fired (one-shot) or already cancelled.
-    bool cancel(TimerId id) noexcept {
+    QUARK_ATTRIBUTE_HOT bool cancel(TimerId id) noexcept {
         if (!id || id.slot >= num_slots_) return false;
         Node& n = node(id.slot);
         if (n.uid != id.uid) return false;
@@ -158,7 +175,7 @@ private:
         uint64_t uid{0};  // 0 while free
         uint32_t next_free{kNpos};
         State state{State::Free};
-        std::string name;
+        char name[kMaxNameLength + 1]{};  // no allocation, unlike a std::string past its SSO size
     };
 
     // hot: read on every poll()
@@ -170,25 +187,25 @@ private:
     uint32_t num_slots_{0};
     uint32_t free_head_{kNpos};
     int64_t slow_task_threshold_ns_{200 * 1000};  // 200us
-#ifndef NDEBUG
-    bool polling_{false};
-#endif
+    int64_t polling_now_ns_{std::numeric_limits<int64_t>::min()};  // now_ns while poll() runs
 
-    QUARK_NOINLINE int poll_expired(int64_t now_ns) {
-#ifndef NDEBUG
-        assert(!polling_ && "TimerQueue::poll() is not reentrant");
-        polling_ = true;
-#endif
+    QUARK_ATTRIBUTE_HOT QUARK_NOINLINE int poll_expired(int64_t now_ns) {
+        assert(polling_now_ns_ == std::numeric_limits<int64_t>::min() && "TimerQueue::poll() is not reentrant");
+        polling_now_ns_ = now_ns;
+        // entries pushed during this poll have seq >= seq_end: only matters for poll(INT64_MAX),
+        // where add_task() cannot defer a due task past now
+        const uint64_t seq_end = seq_;
         int ret = 0;
-        while (!heap_.empty() && heap_[0].when <= now_ns) {
+        while (!heap_.empty() && heap_[0].when <= now_ns && heap_[0].seq < seq_end) {
             const Entry top = heap_[0];
             Node& n = node(top.slot);  // stable: chunks never move
-            const bool repeat = n.interval_ns > 0;
+            int64_t next = 0;
+            const bool repeat = n.interval_ns > 0 && next_fire_time(top.when, n.interval_ns, now_ns, next);
 
             if (repeat) {
                 // reschedule in place (one sift-down instead of pop + push); the new fire
                 // time is > now_ns, so the task cannot run twice in this poll
-                heap_[0].when = next_fire_time(top.when, n.interval_ns, now_ns);
+                heap_[0].when = next;
                 heap_[0].seq = seq_++;
                 sift_down(0);
                 update_next_expiry();
@@ -202,7 +219,7 @@ private:
             const int64_t dur_ns = RdtscClock::tscns() - start_ns;
             ++ret;
             if (dur_ns >= slow_task_threshold_ns_) [[unlikely]] {
-                QUARK_LOG_WARN("found slow timer task:{}, took:{} ns", n.name, dur_ns);
+                QUARK_LOG_WARN("found slow timer task:{}, took:{} ns", std::string_view{n.name}, dur_ns);
             }
 
             if (repeat && keep && n.state == State::Running) [[likely]] {
@@ -213,19 +230,22 @@ private:
             }
         }
         update_next_expiry();
-#ifndef NDEBUG
-        polling_ = false;
-#endif
+        polling_now_ns_ = std::numeric_limits<int64_t>::min();
         return ret;
     }
 
-    static int64_t next_fire_time(int64_t when, int64_t interval, int64_t now_ns) noexcept {
-        int64_t next = when + interval;
+    // First when + k * interval strictly after now_ns; false if that is past INT64_MAX.
+    static bool next_fire_time(int64_t when, int64_t interval, int64_t now_ns, int64_t& next) noexcept {
+        if (__builtin_add_overflow(when, interval, &next)) [[unlikely]] return false;
         if (next <= now_ns) [[unlikely]] {
             // late poll: skip the missed ticks, stay on the original phase
-            next += ((now_ns - next) / interval + 1) * interval;
+            int64_t skip = 0;
+            if (__builtin_mul_overflow((now_ns - next) / interval + 1, interval, &skip) ||
+                __builtin_add_overflow(next, skip, &next)) {
+                return false;
+            }
         }
-        return next;
+        return true;
     }
 
     // ---------------------------------------------------------------- node pool
@@ -249,7 +269,7 @@ private:
     void free_slot(uint32_t slot) noexcept {
         Node& n = node(slot);
         n.cb = nullptr;  // release captured state now
-        n.name.clear();
+        n.name[0] = '\0';
         n.heap_idx = kNpos;
         n.state = State::Free;
         n.uid = 0;  // invalidate outstanding ids

@@ -43,6 +43,7 @@ QUARK_API bool lock_all_memory();
 /// On SIGSEGV, SIGBUS, SIGFPE, SIGILL and SIGABRT, writes the signal and a stack trace to stderr
 /// using async-signal-safe calls only, then re-raises the signal with its default action (so a
 /// core dump is still produced). Records still queued in the async logger may be lost.
+/// The calling thread also gets an alternate signal stack, so a stack overflow there is reported too.
 QUARK_API void install_crash_handler();
 
 /// The first SIGINT or SIGTERM sets shutdown_requested() (check it e.g. in an event loop's step

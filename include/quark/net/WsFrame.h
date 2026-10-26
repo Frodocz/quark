@@ -48,7 +48,8 @@ inline constexpr std::size_t kWsMaxHeaderSize = 14;
 /// the whole header yet, or kWsParseError on a protocol violation (reserved bits or opcodes,
 /// non-minimal length encoding, oversized or fragmented control frame). No field is read before
 /// the buffer is known to contain it.
-[[nodiscard]] inline std::size_t ws_parse_header(std::span<const uint8_t> buf, WsFrameHeader& out) noexcept {
+[[nodiscard]] QUARK_ALWAYS_INLINE std::size_t ws_parse_header(std::span<const uint8_t> buf,
+                                                             WsFrameHeader& out) noexcept {
     const std::size_t len = buf.size();
     if (len < 2) return 0;
     const uint8_t b0 = buf[0];
@@ -98,8 +99,9 @@ inline constexpr std::size_t kWsMaxHeaderSize = 14;
 
 /// Writes a masked client frame header into `dst` (at least ws_client_header_size() bytes).
 /// Returns the bytes written, 0 if `dst` is too small. The payload is masked separately.
-inline std::size_t ws_encode_client_header(std::span<uint8_t> dst, WsOpcode opcode, std::size_t payload_len,
-                                           const uint8_t mask_key[4], bool fin) noexcept {
+QUARK_ALWAYS_INLINE std::size_t ws_encode_client_header(std::span<uint8_t> dst, WsOpcode opcode,
+                                                        std::size_t payload_len, const uint8_t mask_key[4],
+                                                        bool fin) noexcept {
     const std::size_t need = ws_client_header_size(payload_len);
     if (dst.size() < need) return 0;
     uint8_t* p = dst.data();
@@ -124,7 +126,8 @@ inline std::size_t ws_encode_client_header(std::span<uint8_t> dst, WsOpcode opco
 
 /// XORs `data[0, len)` in place with the 4-byte `key` (as on the wire), starting at key
 /// position `key_offset` (non-zero when one payload is masked in several calls).
-inline void ws_mask(uint8_t* data, std::size_t len, const uint8_t key[4], std::size_t key_offset = 0) noexcept {
+QUARK_ALWAYS_INLINE void ws_mask(uint8_t* data, std::size_t len, const uint8_t key[4],
+                                 std::size_t key_offset = 0) noexcept {
     uint8_t rot[4];
     for (std::size_t k = 0; k < 4; ++k) rot[k] = key[(key_offset + k) & 3];
     uint32_t pattern;

@@ -20,7 +20,7 @@ bool g_initialized{false};
 
 bool init_fstack(int argc, char** argv) {
     std::lock_guard<std::mutex> lock(g_init_mutex);
-    if (g_initialized) return true;
+    if (g_initialized) return g_active.load(std::memory_order_acquire);  // false once run() tore DPDK down
     bool has_conf = false;
     for (int i = 1; i < argc; ++i) has_conf |= argv[i] != nullptr && std::strcmp(argv[i], "--conf") == 0;
     if (!has_conf) {

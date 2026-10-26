@@ -13,11 +13,11 @@ public:
     RdtscClock(const RdtscClock&) = delete;
     RdtscClock& operator=(const RdtscClock&) = delete;
 
-    static int64_t rdtsc() {
+    static QUARK_ALWAYS_INLINE int64_t rdtsc() {
         return TSCNS::rdtsc();
     }
 
-    static int64_t tscns() {
+    static QUARK_ALWAYS_INLINE int64_t tscns() {
         return instance().tsc_clock_.rdns();
     }
 

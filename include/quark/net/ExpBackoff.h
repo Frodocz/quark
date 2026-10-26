@@ -12,7 +12,8 @@ namespace net {
 
 /// Exponential backoff for reconnects: initial, 2x initial, 4x initial, ... capped at `max_ns`,
 /// each spread by a random +/- `jitter` fraction so many clients (or many sessions of one client)
-/// that dropped together don't reconnect in lockstep.
+/// that dropped together don't reconnect in lockstep. Delays never exceed `max_ns`: near the cap
+/// the spread is [base * (1 - jitter), max_ns].
 ///
 /// Call reset() only once a connection has proven healthy (e.g. it stayed up for a while), not
 /// as soon as it opens: a server that accepts and immediately closes would otherwise be retried
@@ -31,9 +32,16 @@ public:
         base_ns_ = base_ns_ == 0 ? initial_ns_ : (base_ns_ > max_ns_ / 2 ? max_ns_ : base_ns_ * 2);
         ++attempts_;
         if (jitter_ <= 0.0) return base_ns_;
-        // uniform in [-jitter, +jitter)
+        // uniform in [base * (1 - jitter), min(base * (1 + jitter), max)), computed in double so
+        // nothing overflows near INT64_MAX
         const double u = static_cast<double>(next_random() >> 11) * 0x1.0p-53;
-        return static_cast<int64_t>(static_cast<double>(base_ns_) * (1.0 - jitter_ + 2 * jitter_ * u));
+        const double base = static_cast<double>(base_ns_);
+        const double max = static_cast<double>(max_ns_);
+        const double lo = base * (1.0 - jitter_);
+        const double hi = base * (1.0 + jitter_) < max ? base * (1.0 + jitter_) : max;
+        const double d = lo + (hi - lo) * u;
+        // double(max_ns) may round up past it (and past INT64_MAX): compare before converting
+        return d >= max ? max_ns_ : (d < 1.0 ? 1 : static_cast<int64_t>(d));
     }
 
     /// Back to the initial delay.

@@ -84,7 +84,8 @@ public:
 
     /// Returns `bytes` (> 0) bytes aligned to `align` (a power of two, at most the page size), or
     /// nullptr if the arena doesn't have that much left.
-    [[nodiscard]] void* allocate(std::size_t bytes, std::size_t align = alignof(std::max_align_t)) noexcept {
+    [[nodiscard]] QUARK_ALWAYS_INLINE void* allocate(std::size_t bytes,
+                                                     std::size_t align = alignof(std::max_align_t)) noexcept {
         assert(bytes > 0 && align != 0 && (align & (align - 1)) == 0 && align <= page_size_);
         if (bytes == 0) bytes = 1;
         const std::size_t start = (used_ + align - 1) & ~(align - 1);
@@ -115,7 +116,7 @@ private:
     PageKind page_kind_{PageKind::Normal};
     bool locked_{false};
 
-    void map(std::size_t capacity, bool want_huge) {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void map(std::size_t capacity, bool want_huge) {
         constexpr int kProt = PROT_READ | PROT_WRITE;
         constexpr int kFlags = MAP_PRIVATE | MAP_ANONYMOUS;
         if (want_huge) {

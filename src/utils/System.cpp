@@ -31,6 +31,7 @@ bool cpu_list_contains(std::string_view list, int cpu) noexcept {
             for (const char c : s) {
                 if (c < '0' || c > '9') return -1;
                 v = v * 10 + (c - '0');
+                if (v > CPU_SETSIZE) return -1;  // no such cpu, and no int overflow
             }
             return s.empty() ? -1 : v;
         };
@@ -163,7 +164,18 @@ void install_crash_handler() {
     // backtrace() loads libgcc lazily on first use, which isn't safe inside a handler: do it now
     void* frame[1];
     (void)::backtrace(frame, 1);
-    for (const int sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT}) install(sig, &on_crash, SA_RESETHAND | SA_NODEFER);
+    // A stack overflow leaves no stack to run the handler on: give this thread an alternate one
+    // (per thread; on other threads an overflow still dumps core, without the backtrace).
+    alignas(64) static char alt_stack[64 * 1024];
+    stack_t ss{};
+    ss.ss_sp = alt_stack;
+    ss.ss_size = sizeof(alt_stack);
+    if (::sigaltstack(&ss, nullptr) != 0) {
+        QUARK_LOG_WARN("sigaltstack failed: {}", std::strerror(errno));
+    }
+    for (const int sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT}) {
+        install(sig, &on_crash, SA_RESETHAND | SA_NODEFER | SA_ONSTACK);
+    }
 }
 
 void install_shutdown_handler() {

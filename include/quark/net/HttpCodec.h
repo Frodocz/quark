@@ -26,12 +26,13 @@ enum class HttpMethod : uint8_t { Get, Post, Put, Delete };
 }
 
 /// Writes an HTTP/1.1 request into `dst` without allocating. `header_lines` are complete header
-/// lines without CRLF (e.g. "X-MBX-APIKEY: ..."); Host and, with a body, Content-Length are
-/// added. Returns the bytes written, 0 if `dst` is too small.
-[[nodiscard]] inline std::size_t build_http_request(std::span<char> dst, HttpMethod method, std::string_view host,
-                                                    std::string_view target,
-                                                    std::span<const std::string_view> header_lines,
-                                                    std::span<const uint8_t> body) noexcept {
+/// lines without CRLF (e.g. "X-MBX-APIKEY: ..."); Host and, with a body or for POST/PUT,
+/// Content-Length are added (some front ends answer a bodyless POST without it with 411).
+/// Returns the bytes written, 0 if `dst` is too small.
+[[nodiscard]] inline QUARK_ATTRIBUTE_HOT std::size_t build_http_request(std::span<char> dst, HttpMethod method,
+                                                                        std::string_view host, std::string_view target,
+                                                                        std::span<const std::string_view> header_lines,
+                                                                        std::span<const uint8_t> body) noexcept {
     std::size_t o = 0;
     auto put = [&](std::string_view s) noexcept {
         if (s.size() > dst.size() - o) return false;
@@ -46,7 +47,7 @@ enum class HttpMethod : uint8_t { Get, Post, Put, Delete };
     for (const std::string_view h : header_lines) {
         if (!put(h) || !put("\r\n")) return 0;
     }
-    if (!body.empty()) {
+    if (!body.empty() || method == HttpMethod::Post || method == HttpMethod::Put) {
         char num[24];
         std::size_t p = sizeof(num);
         for (std::size_t v = body.size(); v != 0 || p == sizeof(num); v /= 10) num[--p] = static_cast<char>('0' + v % 10);
@@ -61,6 +62,10 @@ struct HttpResponseView {
     bool complete{false};
     bool malformed{false};          ///< unparsable: the connection can't be reused
     bool keep_alive{true};          ///< false if the server sent "Connection: close"
+    /// No Content-Length and not chunked: the body runs until the server closes the connection.
+    /// complete stays false; once the peer has closed, body holds everything received after the
+    /// headers (HttpClient then delivers it).
+    bool close_delimited{false};
     int status{0};
     std::span<const uint8_t> body;  ///< points into the parsed buffer
     std::size_t consumed{0};        ///< bytes of this response (headers + body)
@@ -76,6 +81,10 @@ inline bool istarts_with(std::string_view s, std::string_view lower_prefix) noex
         if (c != lower_prefix[i]) return false;
     }
     return true;
+}
+
+inline bool iends_with(std::string_view s, std::string_view lower_suffix) noexcept {
+    return s.size() >= lower_suffix.size() && istarts_with(s.substr(s.size() - lower_suffix.size()), lower_suffix);
 }
 
 inline std::string_view trim(std::string_view v) noexcept {
@@ -119,10 +128,11 @@ inline std::size_t parse_chunk_size(std::string_view s) noexcept {
 
 } // namespace detail
 
-/// Parses an HTTP/1.1 response at the start of `buf`: Content-Length or chunked bodies.
+/// Parses an HTTP/1.1 response at the start of `buf`: Content-Length, chunked or (see
+/// close_delimited) close-delimited bodies; 1xx interim responses before it are skipped.
 /// Returns complete == false while more bytes are needed. A chunked body is decoded in place
 /// (the decoded body is never longer than its encoding), only once all chunks are present.
-[[nodiscard]] inline HttpResponseView parse_http_response(std::span<uint8_t> buf) noexcept {
+[[nodiscard]] inline QUARK_ATTRIBUTE_HOT HttpResponseView parse_http_response(std::span<uint8_t> buf) noexcept {
     HttpResponseView r;
     const std::string_view s{reinterpret_cast<const char*>(buf.data()), buf.size()};
     const auto hdr_end = s.find("\r\n\r\n");
@@ -138,14 +148,24 @@ inline std::size_t parse_chunk_size(std::string_view s) noexcept {
     };
 
     const std::string_view status_line = s.substr(0, s.find("\r\n"));
-    if (!status_line.starts_with("HTTP/1.") || status_line.size() < 12 || status_line[8] != ' ') return malformed();
+    if (!status_line.starts_with("HTTP/1.") || status_line.size() < 12 || status_line[8] != ' ' ||
+        (status_line.size() > 12 && status_line[12] != ' ')) {
+        return malformed();
+    }
     for (std::size_t i = 9; i < 12; ++i) {
         if (status_line[i] < '0' || status_line[i] > '9') return malformed();
         r.status = r.status * 10 + (status_line[i] - '0');
     }
+    if (r.status < 200) {
+        // interim response (100 Continue, 103 Early Hints): headers only, the real one follows
+        HttpResponseView next = parse_http_response(buf.subspan(body_start));
+        next.consumed += next.complete ? body_start : 0;
+        return next;
+    }
     r.keep_alive = status_line.starts_with("HTTP/1.1");  // HTTP/1.0 closes by default
 
     bool chunked = false;
+    bool has_length = false;
     std::size_t content_len = 0;
     for (std::size_t pos = status_line.size() + 2; pos < hdr_end;) {
         const std::size_t eol = s.find("\r\n", pos);
@@ -153,8 +173,11 @@ inline std::size_t parse_chunk_size(std::string_view s) noexcept {
         if (detail::istarts_with(line, "content-length:")) {
             content_len = detail::parse_decimal(detail::trim(line.substr(15)));
             if (content_len == detail::kBadNumber) return malformed();
+            has_length = true;
         } else if (detail::istarts_with(line, "transfer-encoding:")) {
-            chunked = line.find("chunked") != std::string_view::npos;
+            // chunked must be the last coding, or the length is unknown (RFC 9112 6.3)
+            if (!detail::iends_with(detail::trim(line.substr(18)), "chunked")) return malformed();
+            chunked = true;
         } else if (detail::istarts_with(line, "connection:")) {
             const std::string_view v = detail::trim(line.substr(11));
             if (detail::istarts_with(v, "close")) r.keep_alive = false;
@@ -164,6 +187,12 @@ inline std::size_t parse_chunk_size(std::string_view s) noexcept {
     }
 
     if (!chunked) {
+        if (!has_length && r.status != 204 && r.status != 304) {
+            r.close_delimited = true;
+            r.keep_alive = false;
+            r.body = {buf.data() + body_start, buf.size() - body_start};
+            return r;
+        }
         if (buf.size() - body_start < content_len) return r;
         r.complete = true;
         r.body = {buf.data() + body_start, content_len};
@@ -186,7 +215,9 @@ inline std::size_t parse_chunk_size(std::string_view s) noexcept {
             break;
         }
         if (buf.size() - (line_end + 2) < size + 2) return r;
-        rp = line_end + 2 + size + 2;
+        const std::size_t data_end = line_end + 2 + size;
+        if (buf[data_end] != '\r' || buf[data_end + 1] != '\n') return malformed();
+        rp = data_end + 2;
     }
 
     std::size_t wp = body_start;

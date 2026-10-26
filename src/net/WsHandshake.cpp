@@ -102,15 +102,22 @@ WsUpgradeResponse parse_ws_upgrade_response(std::span<const uint8_t> resp, std::
 
     // status line: HTTP/1.x <code> <reason>
     const std::string_view status_line = s.substr(0, s.find("\r\n"));
-    if (!status_line.starts_with("HTTP/1.") || status_line.size() < 12 || status_line[8] != ' ') return r;
+    if (!status_line.starts_with("HTTP/1.") || status_line.size() < 12 || status_line[8] != ' ' ||
+        (status_line.size() > 12 && status_line[12] != ' ')) {
+        return r;
+    }
     for (std::size_t i = 9; i < 12; ++i) {
-        if (status_line[i] < '0' || status_line[i] > '9') return r;
+        if (status_line[i] < '0' || status_line[i] > '9') {
+            r.status = 0;
+            return r;
+        }
         r.status = r.status * 10 + (status_line[i] - '0');
     }
     if (r.status != 101) return r;
 
     bool upgrade_ok = false;
     bool accept_ok = false;
+    bool extension = false;
     std::size_t pos = status_line.size() + 2;
     while (pos < end) {
         const std::size_t eol = s.find("\r\n", pos);
@@ -120,10 +127,13 @@ WsUpgradeResponse parse_ws_upgrade_response(std::span<const uint8_t> resp, std::
             upgrade_ok = v.size() == 9 && iequals_prefix(v, "websocket");
         } else if (iequals_prefix(line, "sec-websocket-accept:")) {
             accept_ok = trim(line.substr(21)) == expected_accept;
+        } else if (iequals_prefix(line, "sec-websocket-extensions:")) {
+            // none was offered: e.g. permessage-deflate would make every frame unreadable (6455 4.1)
+            extension = !trim(line.substr(25)).empty();
         }
         pos = eol + 2;
     }
-    r.accepted = upgrade_ok && accept_ok;
+    r.accepted = upgrade_ok && accept_ok && !extension;
     return r;
 }
 

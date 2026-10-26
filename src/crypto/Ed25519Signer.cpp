@@ -8,6 +8,7 @@
 #include <openssl/opensslv.h>
 #include <openssl/pem.h>
 
+#include <cassert>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -42,7 +43,10 @@ Ed25519Signer Ed25519Signer::from_pem(std::string_view pem) {
     BIO* bio = ::BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
     if (bio == nullptr) detail::throw_openssl_error("Ed25519Signer: BIO_new_mem_buf failed");
     auto state = std::make_unique<State>();
-    state->pkey = ::PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+    // a passphrase callback that refuses: OpenSSL's default one prompts on the terminal (and blocks)
+    // for an encrypted key
+    pem_password_cb* no_passphrase = [](char*, int, int, void*) -> int { return 0; };
+    state->pkey = ::PEM_read_bio_PrivateKey(bio, nullptr, no_passphrase, nullptr);
     ::BIO_free(bio);
     if (state->pkey == nullptr) detail::throw_openssl_error("Ed25519Signer: cannot parse PEM private key");
     if (::EVP_PKEY_get_id(state->pkey) != EVP_PKEY_ED25519) {
@@ -63,6 +67,7 @@ Ed25519Signer::Ed25519Signer(Ed25519Signer&&) noexcept = default;
 Ed25519Signer& Ed25519Signer::operator=(Ed25519Signer&&) noexcept = default;
 
 Ed25519Signer::Signature Ed25519Signer::sign(std::string_view message) {
+    assert(state_ && "Ed25519Signer: moved from");
     Signature sig;
     std::size_t len = sig.size();
     // Ed25519 is one-shot (no digest): re-initialize the context for every message

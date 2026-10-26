@@ -35,8 +35,9 @@ inline bool iequals(std::string_view a, std::string_view b) noexcept {
 
 } // namespace detail
 
-/// Parses `text`, returning std::nullopt for an unsupported scheme, a missing host, a bad port
-/// or user info ("user@host", never needed for exchange endpoints).
+/// Parses `text`, returning std::nullopt for an unsupported scheme, a missing host, a bad port,
+/// user info ("user@host", never needed for exchange endpoints), or a space or control character
+/// after the scheme (percent-encode them).
 inline std::optional<Url> parse_url(std::string_view text) {
     Url url;
     const auto sep = text.find("://");
@@ -53,6 +54,11 @@ inline std::optional<Url> parse_url(std::string_view text) {
     if (url.scheme.empty()) return std::nullopt;
 
     std::string_view rest = text.substr(sep + 3);
+    // the host and target go verbatim into the request line and Host header: no spaces or
+    // control characters (CRLF would inject headers)
+    for (const char c : rest) {
+        if (static_cast<unsigned char>(c) <= 0x20 || c == 0x7f) return std::nullopt;
+    }
     if (const auto frag = rest.find('#'); frag != std::string_view::npos) rest = rest.substr(0, frag);
     const auto target_pos = rest.find_first_of("/?");
     std::string_view authority = rest.substr(0, target_pos);

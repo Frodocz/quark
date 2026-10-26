@@ -43,7 +43,10 @@ struct HttpClientOptions {
 /// - A keep-alive connection the server closes while idle is noticed right away and reopened
 ///   (auto_reconnect), instead of failing the next request.
 /// - Connection: close responses, malformed responses, transport errors and timeouts drop the
-///   connection; the last three also report on_error.
+///   connection; the last three also report on_error. After a Connection: close response the
+///   client reconnects right away (no backoff) and is NotReady inside that on_response.
+/// - A response without Content-Length or chunked encoding ends when the server closes the
+///   connection (over TLS, a close without close_notify can't be told apart from truncation).
 template <Stream Transport>
 class HttpClient final : public Pollable {
 public:
@@ -77,7 +80,7 @@ public:
     void set_host(std::string_view host) { host_.assign(host); }
     [[nodiscard]] Transport& transport() noexcept { return transport_; }
 
-    void connect(const Endpoint& ep) {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void connect(const Endpoint& ep) {
         ep_ = ep;
         user_closed_ = false;
         cancel_timer(reconnect_timer_);
@@ -85,15 +88,16 @@ public:
         start_connect();
     }
 
-    void close() {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void close() {
         user_closed_ = true;
         cancel_timer(reconnect_timer_);
         teardown(false);
     }
 
     /// Sends a request if the client is idle. `header_lines` are complete lines without CRLF.
-    [[nodiscard]] Submit request(HttpMethod method, std::string_view target, std::span<const std::string_view> header_lines,
-                                 std::span<const uint8_t> body = {}) {
+    [[nodiscard]] QUARK_ATTRIBUTE_HOT Submit request(HttpMethod method, std::string_view target,
+                                                     std::span<const std::string_view> header_lines,
+                                                     std::span<const uint8_t> body = {}) {
         if (state_ != State::Idle) return state_ == State::Busy ? Submit::Busy : Submit::NotReady;
         send_.reset();
         const std::span<uint8_t> spare = send_.spare();
@@ -123,7 +127,7 @@ public:
 
     [[nodiscard]] int fd() const noexcept override { return transport_.fd(); }
 
-    void on_ready(uint32_t /*flags*/) override {
+    QUARK_ATTRIBUTE_HOT void on_ready(uint32_t /*flags*/) override {
         switch (state_) {
             case State::Connecting: {
                 const StreamPhase ph = transport_.poll_open();
@@ -158,6 +162,7 @@ private:
     bool registered_{false};
     bool write_armed_{false};
     bool user_closed_{false};
+    uint32_t conn_gen_{0};  // bumped by every teardown: callbacks may end or replace the connection
     Endpoint ep_;
     std::string host_;
     IOBuffer send_;
@@ -171,7 +176,7 @@ private:
     ResponseHandler on_response_;
     ErrorHandler on_error_;
 
-    void start_connect() {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void start_connect() {
         if ((!send_ && !(send_ = pool_.acquire())) || (!recv_ && !(recv_ = pool_.acquire()))) {
             QUARK_LOG_ERROR("http {}: no buffers available", host_);
             schedule_reconnect();
@@ -213,10 +218,16 @@ private:
             }
             send_off_ += static_cast<std::size_t>(n);
         }
-        set_write_interest(false);
+        // TLS may still hold records the socket didn't take: keep write interest until they're out
+        const sys::io_result f = transport_.flush();
+        if (f < 0 && f != -EAGAIN) {
+            fail();
+            return;
+        }
+        set_write_interest(f == -EAGAIN);
     }
 
-    void drive_recv() {
+    QUARK_ATTRIBUTE_HOT void drive_recv() {
         for (;;) {
             const std::span<uint8_t> space = recv_.spare();
             if (space.empty()) {
@@ -227,7 +238,15 @@ private:
             const sys::io_result n = transport_.read(space);
             if (n == -EAGAIN) return;
             if (n <= 0) {
-                // the response may be delimited by the close (no Content-Length): nothing we accept
+                if (n == 0) {
+                    HttpResponseView r = parse_http_response(recv_.bytes());
+                    if (r.close_delimited) {  // its end is this close
+                        r.complete = true;
+                        r.consumed = recv_.size();
+                        complete_response(r);
+                        return;
+                    }
+                }
                 QUARK_LOG_WARN("http {}: connection closed during the response", host_);
                 fail();
                 return;
@@ -240,16 +259,28 @@ private:
                 fail();
                 return;
             }
-            cancel_timer(request_timer_);
-            state_ = State::Idle;
-            if (on_response_) on_response_(r);
-            if (!registered_) return;  // closed in the callback
-            if (!r.keep_alive) {
-                teardown(true);
-                return;
-            }
-            recv_.reset();
+            complete_response(r);
             return;
+        }
+    }
+
+    void complete_response(const HttpResponseView& r) {
+        cancel_timer(request_timer_);
+        if (!r.keep_alive) {
+            // done with this connection before the callback: a request it submits gets NotReady
+            // instead of going out on a socket about to close. A clean close is no failure.
+            backoff_.reset();
+            teardown(false);
+        } else {
+            state_ = State::Idle;
+        }
+        const uint32_t gen = conn_gen_;
+        if (on_response_) on_response_(r);  // r.body stays valid: recv_ is kept until the next request
+        if (gen != conn_gen_) return;      // closed or reconnected in the callback
+        if (!r.keep_alive) {
+            if (opts_.auto_reconnect && !user_closed_) start_connect();
+        } else if (state_ == State::Idle) {
+            recv_.reset();
         }
     }
 
@@ -266,12 +297,13 @@ private:
         teardown(true);
     }
 
-    void fail() {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void fail() {
         teardown(true);
         if (on_error_) on_error_();
     }
 
-    void teardown(bool reconnect) {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void teardown(bool reconnect) {
+        ++conn_gen_;
         if (registered_) {
             loop_.remove(*this);
             registered_ = false;
@@ -286,7 +318,7 @@ private:
         if (reconnect) schedule_reconnect();
     }
 
-    void schedule_reconnect() {
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void schedule_reconnect() {
         if (!opts_.auto_reconnect || user_closed_ || reconnect_timer_) return;
         const int64_t delay = backoff_.next_delay_ns();
         reconnect_timer_ = loop_.timers().add_task("http_reconnect", [this] {

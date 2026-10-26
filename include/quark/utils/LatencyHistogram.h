@@ -30,7 +30,7 @@ public:
     static constexpr int kSubBuckets = 1 << kSubBucketBits;
     static constexpr int kBuckets = (64 - kSubBucketBits) * kSubBuckets + kSubBuckets;
 
-    void record(int64_t value) noexcept {
+    QUARK_ALWAYS_INLINE void record(int64_t value) noexcept {
         if (value < 0) value = 0;
         ++counts_[index_of(static_cast<uint64_t>(value))];
         ++count_;
@@ -39,13 +39,20 @@ public:
         if (value > max_) max_ = value;
     }
 
-    /// The smallest bucket upper bound below which `p` (0..100) percent of the samples fall,
-    /// clamped to the exact maximum. 0 when empty.
-    [[nodiscard]] int64_t percentile(double p) const noexcept {
+    /// The smallest bucket upper bound at or below which at least `p` (0..100) percent of the
+    /// samples fall (nearest rank: ceil(count * p / 100)), clamped to the exact maximum. 0 when
+    /// empty; NaN is treated as 0.
+    [[nodiscard]] QUARK_ATTRIBUTE_COLD int64_t percentile(double p) const noexcept {
         if (count_ == 0) return 0;
-        if (p <= 0) return min_;
-        const auto rank = static_cast<uint64_t>(p >= 100 ? static_cast<double>(count_)
-                                                         : static_cast<double>(count_) * p / 100.0 + 0.5);
+        if (!(p > 0)) return min_;  // also NaN
+        uint64_t rank = count_;
+        if (p < 100) {
+            const double exact = static_cast<double>(count_) * p / 100.0;
+            rank = static_cast<uint64_t>(exact);
+            // ceil, without counting rounding noise (99.9 / 100 * 200000 is 199800.00000000003)
+            if (exact - static_cast<double>(rank) > 1e-9 * exact) ++rank;
+            if (rank == 0) rank = 1;
+        }
         uint64_t seen = 0;
         for (int i = 0; i < kBuckets; ++i) {
             seen += counts_[i];
@@ -62,7 +69,7 @@ public:
     [[nodiscard]] int64_t max() const noexcept { return count_ ? max_ : 0; }
     [[nodiscard]] double mean() const noexcept { return count_ ? sum_ / static_cast<double>(count_) : 0; }
 
-    void merge(const BasicLatencyHistogram& other) noexcept {
+    QUARK_ATTRIBUTE_COLD void merge(const BasicLatencyHistogram& other) noexcept {
         for (int i = 0; i < kBuckets; ++i) counts_[i] += other.counts_[i];
         count_ += other.count_;
         sum_ += other.sum_;
@@ -72,7 +79,14 @@ public:
         }
     }
 
-    void reset() noexcept { *this = BasicLatencyHistogram{}; }
+    // in place: a temporary would put up to 440 KiB on the stack
+    void reset() noexcept {
+        counts_.fill(0);
+        count_ = 0;
+        sum_ = 0;
+        min_ = std::numeric_limits<int64_t>::max();
+        max_ = 0;
+    }
 
 private:
     std::array<uint64_t, kBuckets> counts_{};
@@ -82,7 +96,7 @@ private:
     int64_t max_{0};
 
     // values below 2 * kSubBuckets map 1:1; above, the top kSubBucketBits + 1 bits select the bucket
-    static constexpr int index_of(uint64_t v) noexcept {
+    static QUARK_ALWAYS_INLINE constexpr int index_of(uint64_t v) noexcept {
         if (v < 2 * kSubBuckets) return static_cast<int>(v);
         const int shift = std::bit_width(v) - 1 - kSubBucketBits;  // >= 1
         return (shift + 1) * kSubBuckets + static_cast<int>((v >> shift) & (kSubBuckets - 1));

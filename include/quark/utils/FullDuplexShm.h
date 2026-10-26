@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <sys/file.h>
 
@@ -27,8 +29,17 @@ public:
         return read_queue()->tryPop(std::forward<Reader>(reader));
     }
 
+    /// Largest payload try_write() accepts: the header and payload must fit the 16-bit size field
+    /// and the ring.
+    static constexpr uint32_t kMaxPayload =
+        std::min<uint32_t>(UINT16_MAX, Bytes) - static_cast<uint32_t>(sizeof(MsgHeader));
+
+    /// False if the queue is full or size > kMaxPayload (the queue's 16-bit size would wrap).
     template <class Writer>
     QUARK_ALWAYS_INLINE bool try_write(uint16_t size, Writer&& writer) {
+        if (size > kMaxPayload) [[unlikely]] {
+            return false;
+        }
         return write_queue()->tryPush(size, std::forward<Writer>(writer));
     }
 private:

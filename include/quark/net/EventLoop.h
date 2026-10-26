@@ -2,6 +2,7 @@
 
 #include "quark/Attributes.h"
 #include "quark/QuarkError.h"
+#include "quark/QuarkLog.h"
 #include "quark/net/Poller.h"
 #include "quark/utils/InplaceFunction.h"
 #include "quark/utils/RdtscClock.h"
@@ -9,6 +10,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <cstring>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -42,7 +45,10 @@ struct EventLoopConfig {
     /// the batch are handled in the next step (none are dropped). Larger: fewer epoll_wait() calls
     /// under load; smaller: the step hook and timers run sooner when many connections are busy.
     int max_events{64};
-    int64_t poll_timeout_ns{0};  ///< poller mode: how long a step may block, 0 == spin
+    /// Poller mode: how long a step may block, 0 == spin, < 0 == until an event. The wait never
+    /// outlasts the next timer. Nothing wakes it early for work posted by other threads (e.g. a
+    /// CommandQueue drained in the step hook): that waits up to this long.
+    int64_t poll_timeout_ns{0};
     uint32_t max_timers{256};    ///< reserved TimerQueue capacity
 };
 
@@ -76,14 +82,14 @@ public:
     EventLoop& operator=(const EventLoop&) = delete;
 
     /// Starts driving `p` (its fd must be open). Not a hot-path call.
-    bool add(Pollable& p, bool want_write) {
+    QUARK_ATTRIBUTE_COLD bool add(Pollable& p, bool want_write) {
         if (!cfg_.busy_poll && !poller_.add(p.fd(), &p, want_write)) return false;
         pollables_.push_back(&p);
         return true;
     }
 
     /// Stops driving `p`; call it before closing p's fd. Safe from inside p.on_ready().
-    void remove(Pollable& p) noexcept {
+    QUARK_ATTRIBUTE_COLD void remove(Pollable& p) noexcept {
         if (!cfg_.busy_poll) {
             poller_.remove(p.fd());
             // drop events of `p` still pending in the batch being dispatched
@@ -101,7 +107,7 @@ public:
 
     /// Poller mode: (un)subscribes `p` from writable edges. Callers track the current state
     /// and only call this when it changes. No-op in busy-poll mode.
-    void set_write_interest(Pollable& p, bool want_write) noexcept {
+    QUARK_ALWAYS_INLINE void set_write_interest(Pollable& p, bool want_write) noexcept {
         if (!cfg_.busy_poll) poller_.modify(p.fd(), &p, want_write);
     }
 
@@ -113,7 +119,7 @@ public:
 
     void set_step_hook(StepHook hook) { step_hook_ = std::move(hook); }
 
-    void step() {
+    QUARK_ATTRIBUTE_HOT void step() {
         now_ns_ = RdtscClock::tscns();
         if (step_hook_) step_hook_();
         if (cfg_.busy_poll) {
@@ -121,7 +127,18 @@ public:
                 if (Pollable* p = pollables_[i]) p->on_ready(0);
             }
         } else {
-            dispatch_count_ = poller_.wait(events_, cfg_.max_events, cfg_.poll_timeout_ns);
+            int64_t timeout = cfg_.poll_timeout_ns;
+            if (timeout != 0) {
+                // block no longer than the next timer
+                const int64_t until_timer = std::max<int64_t>(timers_.next_expiry_ns() - now_ns_, 0);
+                if (timeout < 0 || until_timer < timeout) timeout = until_timer;
+            }
+            dispatch_count_ = poller_.wait(events_, cfg_.max_events, timeout);
+            if (dispatch_count_ < 0) [[unlikely]] {
+                on_wait_error();
+                dispatch_count_ = 0;
+            }
+            if (timeout != 0) now_ns_ = RdtscClock::tscns();  // the wait may have blocked
             for (dispatch_idx_ = 0; dispatch_idx_ < dispatch_count_; ++dispatch_idx_) {
                 if (auto* p = static_cast<Pollable*>(events_[dispatch_idx_].token)) p->on_ready(events_[dispatch_idx_].flags);
             }
@@ -132,7 +149,7 @@ public:
             std::erase(pollables_, nullptr);
             removed_ = false;
         }
-        timers_.poll(now_ns_);  // at most one step late, saves a clock read per step
+        timers_.poll(now_ns_);  // busy-poll: at most one step late, saves a clock read per step
     }
 
     /// Calls step() until stop().
@@ -155,6 +172,14 @@ public:
     }
 
 private:
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void on_wait_error() noexcept {
+        // a broken epoll fd fails every step: report it once, not at the spin rate
+        if (!wait_error_logged_) {
+            wait_error_logged_ = true;
+            QUARK_LOG_ERROR("EventLoop: epoll_wait failed: {}", std::strerror(errno));
+        }
+    }
+
 #if defined(QUARK_USE_FSTACK)
     static int fstack_iteration(void* arg) {
         auto* self = static_cast<EventLoop*>(arg);
@@ -177,6 +202,7 @@ private:
     StepHook step_hook_;
     int64_t now_ns_{0};
     bool removed_{false};
+    bool wait_error_logged_{false};
     std::atomic<bool> running_{false};
 };
 

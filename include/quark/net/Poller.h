@@ -34,6 +34,8 @@ struct ReadyEvent {
 /// Edge-triggered readiness notification (epoll, or F-Stack's ff_epoll). Users must drain a
 /// socket (read until -EAGAIN) on every edge, or data already received never triggers another one.
 /// Events beyond one wait() batch stay queued and are returned by the next wait().
+/// F-Stack's ff_epoll (over kqueue) never blocks (the timeout is ignored) and may report one
+/// socket's readable and writable edges as two events.
 class Poller {
 public:
     /// Most events one wait() can return: bounds its stack buffer to kMaxEvents * 12 bytes (12 KiB,
@@ -59,16 +61,17 @@ public:
 
     bool add(int fd, void* token, bool want_write) noexcept { return ctl(EPOLL_CTL_ADD, fd, token, want_write); }
     bool modify(int fd, void* token, bool want_write) noexcept { return ctl(EPOLL_CTL_MOD, fd, token, want_write); }
-    bool remove(int fd) noexcept { return epoll_ctl(handle_, EPOLL_CTL_DEL, fd, nullptr) == 0; }
+    /// An fd closed already (e.g. by a failed connect) left the set when it was closed.
+    bool remove(int fd) noexcept { return fd < 0 || epoll_ctl(handle_, EPOLL_CTL_DEL, fd, nullptr) == 0; }
 
     /// Waits up to `timeout_ns` (0: don't wait, < 0: forever) and fills up to `max` events.
     /// Returns the number of events, 0 on timeout or EINTR, -1 on error.
-    int wait(ReadyEvent* out, int max, int64_t timeout_ns) noexcept {
+    QUARK_ATTRIBUTE_HOT int wait(ReadyEvent* out, int max, int64_t timeout_ns) noexcept {
         int timeout_ms = 0;
         if (timeout_ns < 0) {
             timeout_ms = -1;
         } else if (timeout_ns > 0) {
-            const int64_t ms = (timeout_ns + 999'999) / 1'000'000;
+            const int64_t ms = timeout_ns / 1'000'000 + (timeout_ns % 1'000'000 != 0);  // round up, no overflow
             timeout_ms = ms > std::numeric_limits<int>::max() ? std::numeric_limits<int>::max() : static_cast<int>(ms);
         }
         epoll_event evs[kMaxEvents];
@@ -95,7 +98,11 @@ private:
     }
 
 #if defined(QUARK_USE_FSTACK)
-    static int epoll_ctl(int h, int op, int fd, epoll_event* ev) noexcept { return ::ff_epoll_ctl(h, op, fd, ev); }
+    static int epoll_ctl(int h, int op, int fd, epoll_event* ev) noexcept {
+        // after run() returned DPDK is gone: removing (from a destructor) succeeds trivially
+        if (!fstack_active()) return op == EPOLL_CTL_DEL ? 0 : -1;
+        return ::ff_epoll_ctl(h, op, fd, ev);
+    }
     static int epoll_wait(int h, epoll_event* evs, int max, int timeout_ms) noexcept {
         return ::ff_epoll_wait(h, evs, max, timeout_ms);
     }

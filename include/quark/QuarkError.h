@@ -24,11 +24,13 @@
     #define QUARK_THROW(ex) QUARK_REQUIRE(false, ex.what())
     #define QUARK_CATCH(x) if (false)
     #define QUARK_CATCH_ALL() if (false)
+    #define QUARK_RETHROW std::abort()
 #else
     #define QUARK_TRY try
     #define QUARK_THROW(ex) throw(ex)
     #define QUARK_CATCH(x) catch (x)
     #define QUARK_CATCH_ALL() catch (...)
+    #define QUARK_RETHROW throw
 #endif
 
 QUARK_BEGIN_NAMESPACE
@@ -52,10 +54,11 @@ private:
 
 QUARK_END_EXPORT
 
-#define QUARK_ASSERT(cond, ...) {                                    \
+#define QUARK_ASSERT(cond, ...)                                      \
+    do {                                                             \
         if (!(cond)) {                                               \
             QUARK_THROW(quark::QuarkError{"Assert failed: " #cond}); \
         }                                                            \
-    }
+    } while (0)
 
 QUARK_END_NAMESPACE

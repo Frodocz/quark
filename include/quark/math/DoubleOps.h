@@ -57,7 +57,7 @@ template <std::floating_point T>
         return (a > kMax && b > kMax) || (a < -kMax && b < -kMax);
     }
     // Never compute a - b directly: it can overflow (e.g. 1e308 - -1e308), which is
-    // harmless at run time but not a constant expression. Work on magnitudes instead.round_to_tick_raw
+    // harmless at run time but not a constant expression. Work on magnitudes instead.
     const T abs_a = math::abs(a);
     const T abs_b = math::abs(b);
     const T hi = math::max(abs_a, abs_b);

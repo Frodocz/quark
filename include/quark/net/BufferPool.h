@@ -52,10 +52,10 @@ public:
     BufferPool& operator=(const BufferPool&) = delete;
 
     /// Returns an empty buffer with `reserve_front` bytes of headroom, or an invalid handle
-    /// (operator bool() == false) when the pool is exhausted.
+    /// (operator bool() == false) when the pool is exhausted or reserve_front > buffer_size().
     [[nodiscard]] IOBuffer acquire(std::size_t reserve_front = 0) noexcept {
         assert(reserve_front <= buf_size_);
-        if (free_.empty()) [[unlikely]] return {};
+        if (free_.empty() || reserve_front > buf_size_) [[unlikely]] return {};
         const uint32_t idx = free_.back();
         free_.pop_back();
 #ifndef NDEBUG
@@ -83,7 +83,7 @@ public:
 #endif
         QUARK_ASAN_POISON(buf.base_, buf_size_);
         free_.push_back(idx);  // never reallocates: reserved to count_
-        buf = IOBuffer{};
+        buf.clear();
     }
 
     [[nodiscard]] std::size_t available() const noexcept { return free_.size(); }
@@ -112,7 +112,7 @@ private:
         return rounded;
     }
 
-    void init(MemoryArena& arena) {
+    QUARK_ATTRIBUTE_COLD void init(MemoryArena& arena) {
         base_ = static_cast<uint8_t*>(arena.allocate(count_ * buf_size_, kAlignment));
         if (base_ == nullptr) {
             QUARK_THROW(QuarkError{"BufferPool: not enough space left in the arena"});

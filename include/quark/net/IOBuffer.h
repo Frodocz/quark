@@ -20,9 +20,26 @@ class BufferPool;
 ///
 /// Acquiring with reserved headroom lets a protocol layer prepend() its header in front of a
 /// payload that is already in place, so the payload is never moved on send.
+///
+/// Move-only, so exactly one handle owns a buffer and it can't be released twice through a copy.
+/// The size arguments of append/prepend/consume/reset are preconditions (asserted in debug).
 class IOBuffer {
 public:
     IOBuffer() = default;
+    IOBuffer(const IOBuffer&) = delete;
+    IOBuffer& operator=(const IOBuffer&) = delete;
+    IOBuffer(IOBuffer&& o) noexcept : base_{o.base_}, cap_{o.cap_}, head_{o.head_}, len_{o.len_} { o.clear(); }
+    IOBuffer& operator=(IOBuffer&& o) noexcept {
+        if (this != &o) {
+            assert(!valid() && "IOBuffer: overwriting a buffer that was not released");
+            base_ = o.base_;
+            cap_ = o.cap_;
+            head_ = o.head_;
+            len_ = o.len_;
+            o.clear();
+        }
+        return *this;
+    }
 
     [[nodiscard]] bool valid() const noexcept { return base_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
@@ -35,14 +52,14 @@ public:
     [[nodiscard]] std::size_t headroom() const noexcept { return head_; }
     [[nodiscard]] std::size_t tailroom() const noexcept { return cap_ - head_ - len_; }
 
-    [[nodiscard]] std::span<uint8_t> bytes() noexcept { return {data(), len_}; }
+    [[nodiscard]] QUARK_ALWAYS_INLINE std::span<uint8_t> bytes() noexcept { return {data(), len_}; }
     [[nodiscard]] std::span<const uint8_t> bytes() const noexcept { return {data(), len_}; }
 
     /// Writable region after the data, e.g. to recv() into before append().
-    [[nodiscard]] std::span<uint8_t> spare() noexcept { return {data() + len_, tailroom()}; }
+    [[nodiscard]] QUARK_ALWAYS_INLINE std::span<uint8_t> spare() noexcept { return {data() + len_, tailroom()}; }
 
     /// Grows the data by `n` bytes at the back and returns them for the caller to fill.
-    std::span<uint8_t> append(std::size_t n) noexcept {
+    QUARK_ALWAYS_INLINE std::span<uint8_t> append(std::size_t n) noexcept {
         assert(n <= tailroom());
         uint8_t* p = data() + len_;
         len_ += n;
@@ -50,7 +67,7 @@ public:
     }
 
     /// Grows the data by `n` bytes at the front, taken from the headroom, and returns them.
-    std::span<uint8_t> prepend(std::size_t n) noexcept {
+    QUARK_ALWAYS_INLINE std::span<uint8_t> prepend(std::size_t n) noexcept {
         assert(n <= head_);
         head_ -= n;
         len_ += n;
@@ -58,14 +75,14 @@ public:
     }
 
     /// Drops `n` bytes from the front of the data.
-    void consume(std::size_t n) noexcept {
+    QUARK_ALWAYS_INLINE void consume(std::size_t n) noexcept {
         assert(n <= len_);
         head_ += n;
         len_ -= n;
     }
 
     /// Empties the buffer, keeping `reserve_front` bytes of headroom.
-    void reset(std::size_t reserve_front = 0) noexcept {
+    QUARK_ALWAYS_INLINE void reset(std::size_t reserve_front = 0) noexcept {
         assert(reserve_front <= cap_);
         head_ = reserve_front;
         len_ = 0;
@@ -80,6 +97,11 @@ public:
 
 private:
     friend class BufferPool;
+
+    void clear() noexcept {
+        base_ = nullptr;
+        cap_ = head_ = len_ = 0;
+    }
 
     uint8_t* base_{nullptr};
     std::size_t cap_{0};
