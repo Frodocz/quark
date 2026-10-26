@@ -43,12 +43,16 @@ and lock-free queues for quickly start some latency-sensitive applications such 
 
 ## Features
 | Modules             | Descriptions                                                                                                   |
-|---------------------|----------------------------------------------------------------------------------------------------------------|
-| **Configuration**   | `TOML` used for personal preference, wrapping [toml++](https://github.com/marzer/tomlplusplus)                 |
-| **Fixed-Point**     | Fixed-point numbers are needed in financial systems to prevent tiny rounding errors from binary math           |
-| **Lock-Free Queues**| Lock-Free queues to for high-performance, low-latency and predictable concurrent systems                       |
-| **Logging**         | Wrapping [`Quill`](https://github.com/odygrd/quill), one of the fastest C++ logging module                     |
-| **Tsc closk**       | Wrapping [`tscns`](https://github.com/odygrd/tscns), a low overhead nanosecond clock based on x86 TSC          |
+|---------------------|---------------------------------------------------------------------------------------------------------------------|
+| **Memory Arena**    | Backbone of internal modules like `net`, providing `IOBuffer`, `CircularBuffer` and `BufferPool`                    |
+| **Configuration**   | `TOML` used for personal preference, wrapping [toml++](https://github.com/marzer/tomlplusplus)                      |
+| **Fixed-Point**     | Fixed-point numbers are needed in financial systems to prevent tiny rounding errors from binary math                |
+| **Lock-Free Queues**| Lock-Free queues to for high-performance, low-latency and predictable concurrent systems                            |
+| **Logging**         | Wrapping [`Quill`](https://github.com/odygrd/quill), one of the fastest C++ logging module                          |
+| **Network**         | Support `HTTP` and `Websocket` clients (with `TLS`), switching between kernel sockets and `DPDK` (`F-Stack` backend)|
+| **Object Pool**     | A Single-threaded pool of fixed-type objects                                                                        |
+| **TimerQueue**      | A Single-threaded timer queue meant to be polled from a busy-poll event loop                                        |
+| **Tsc closk**       | Wrapping [`tscns`](https://github.com/odygrd/tscns), a low overhead nanosecond clock based on x86 TSC               |
 
 ---
 
