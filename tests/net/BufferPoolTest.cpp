@@ -3,6 +3,8 @@
 
 #include <cstring>
 #include <set>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace quark;
@@ -22,6 +24,51 @@ TEST_F(TestBufferPool, SizesAreCacheLineRounded) {
     EXPECT_EQ(b.capacity(), 128u);
     EXPECT_EQ(b.size(), 0u);
     EXPECT_EQ(b.tailroom(), 128u);
+    pool.release(b);
+}
+
+static_assert(!std::is_copy_constructible_v<IOBuffer> && !std::is_copy_assignable_v<IOBuffer>,
+              "one handle per buffer: a copy could be released twice");
+static_assert(std::is_nothrow_move_constructible_v<IOBuffer>);
+
+TEST_F(TestBufferPool, MoveTransfersOwnership) {
+    BufferPool pool(2, 64, {.huge_pages = MemoryArena::HugePages::Never});
+    IOBuffer a = pool.acquire();
+    IOBuffer b = std::move(a);
+    EXPECT_FALSE(a);  // NOLINT(bugprone-use-after-move): moved-from is empty by contract
+    EXPECT_TRUE(b);
+    pool.release(a);  // no-op
+    EXPECT_EQ(pool.available(), 1u);
+    pool.release(b);
+    EXPECT_EQ(pool.available(), 2u);
+}
+
+TEST_F(TestBufferPool, HeadroomBounds) {
+    BufferPool pool(2, 64, {.huge_pages = MemoryArena::HugePages::Never});
+    IOBuffer full = pool.acquire(64);  // all headroom: valid, nothing appendable
+    ASSERT_TRUE(full);
+    EXPECT_EQ(full.tailroom(), 0u);
+    EXPECT_EQ(full.headroom(), 64u);
+    pool.release(full);
+#ifdef NDEBUG
+    IOBuffer too_big = pool.acquire(65);  // rejected in release builds (asserts in debug)
+    EXPECT_FALSE(too_big);
+    EXPECT_EQ(pool.available(), 2u);
+#endif
+    IOBuffer b = pool.acquire(16);
+    std::memcpy(b.append(8).data(), "payload!", 8);
+    b.consume(8);  // empty again, headroom 24
+    EXPECT_TRUE(b.empty());
+    EXPECT_EQ(b.headroom(), 24u);
+    std::memcpy(b.prepend(4).data(), "hdr:", 4);  // into the space consume() freed
+    EXPECT_EQ(b.headroom(), 20u);
+    b.compact();
+    EXPECT_EQ(b.headroom(), 0u);
+    EXPECT_EQ(b.tailroom(), 60u);
+    EXPECT_EQ(std::memcmp(b.data(), "hdr:", 4), 0);
+    b.consume(4);
+    b.compact();  // len 0
+    EXPECT_EQ(b.tailroom(), 64u);
     pool.release(b);
 }
 
@@ -135,13 +182,10 @@ TEST_F(TestBufferPool, PrependAppendConsume) {
 }
 
 #ifndef NDEBUG
-TEST_F(TestBufferPool, DoubleReleaseAndForeignBufferDetectedInDebug) {
+// (a double release through a copied handle can't happen: IOBuffer is move-only, see above)
+TEST_F(TestBufferPool, ForeignBufferDetectedInDebug) {
     BufferPool pool(2, 64);
     BufferPool other(2, 64);
-    IOBuffer b = pool.acquire();
-    IOBuffer copy = b;  // handles are copyable views: releasing both is a double release
-    pool.release(b);
-    EXPECT_DEATH(pool.release(copy), "double release");
     IOBuffer foreign = other.acquire();
     EXPECT_DEATH(pool.release(foreign), "not from this pool");
     other.release(foreign);

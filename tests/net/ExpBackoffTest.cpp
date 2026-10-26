@@ -54,3 +54,34 @@ TEST_F(TestExpBackoff, SameSeedIsDeterministic) {
     ExpBackoff b(1'000, 100'000, 0.5, 42);
     for (int i = 0; i < 10; ++i) EXPECT_EQ(a.next_delay_ns(), b.next_delay_ns());
 }
+
+TEST_F(TestExpBackoff, JitterNearInt64MaxStaysPositiveAndCapped) {
+    constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+    for (uint64_t seed = 1; seed <= 50; ++seed) {
+        ExpBackoff b(kMax / 2 + 1, kMax, 0.2, seed);
+        for (int i = 0; i < 10; ++i) {
+            const int64_t d = b.next_delay_ns();
+            EXPECT_GT(d, 0);
+            EXPECT_LE(d, kMax);
+        }
+    }
+}
+
+TEST_F(TestExpBackoff, JitterNeverExceedsTheCap) {
+    for (uint64_t seed = 1; seed <= 100; ++seed) {
+        ExpBackoff b(100, 1'000, 0.2, seed);
+        for (int i = 0; i < 20; ++i) {
+            const int64_t d = b.next_delay_ns();
+            EXPECT_LE(d, 1'000);
+            EXPECT_GE(d, 100 * 8 / 10);
+        }
+    }
+    // at the cap the delays still spread (below it) instead of all being max_ns
+    std::set<int64_t> at_cap;
+    for (uint64_t seed = 1; seed <= 100; ++seed) {
+        ExpBackoff b(1'000'000, 1'000'000, 0.2, seed);
+        at_cap.insert(b.next_delay_ns());
+    }
+    EXPECT_GT(at_cap.size(), 90u);
+    EXPECT_GE(*at_cap.begin(), 800'000);
+}

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace quark;
@@ -318,6 +319,143 @@ TEST_P(TestWsSession, PongTimeoutReconnects) {
         client.ws->connect(server.endpoint());
         ASSERT_TRUE(run_until(client.loop, [&] { return server.accepted() >= 2; }, 2000ms));
         EXPECT_GE(pings.load(), 1);
+    });
+}
+
+namespace {
+template <class T>
+void set_client_send_buf(WsSession<T>& ws, int bytes) {
+    if constexpr (std::is_same_v<T, TlsStream>) {
+        ws.transport().tcp().set_send_buf(bytes);
+    } else {
+        ws.transport().set_send_buf(bytes);
+    }
+}
+}  // namespace
+
+// Over TLS a write takes at most one 16 KiB record: the rest must be written without waiting for
+// a writable edge that never comes (the socket stayed writable)
+TEST_P(TestWsSession, FrameLargerThanOneTlsRecord) {
+    std::atomic<long> got{-1};
+    TestServer server(
+        [&](ServerConn& c, TestServer& s) {
+            c.accept_websocket();
+            auto f = c.read_frame();
+            got = f ? static_cast<long>(f->payload.size()) : -2;
+            s.hold();
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client(busy(), {}, 64 * 1024, 64 * 1024);
+        client.ws->connect(server.endpoint());
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.ws->is_open(); }));
+        EXPECT_EQ(client.ws->send_text(std::string(40'000, 'o')), WsSession<T>::SendStatus::Ok);
+        EXPECT_TRUE(run_until(client.loop, [&] { return got.load() != -1; }));
+        EXPECT_EQ(got.load(), 40'000);
+        EXPECT_EQ(client.ws->pending_frames(), 0u);
+    });
+}
+
+// TLS records staged on EAGAIN must go out on the writable edge, without inbound traffic to
+// trigger a read
+TEST_P(TestWsSession, EverythingQueuedReachesASlowReader) {
+    constexpr int kFrames = 20;
+    std::atomic<int> got{0};
+    TestServer server(
+        [&](ServerConn& c, TestServer& s) {
+            c.accept_websocket();
+            std::this_thread::sleep_for(300ms);  // not reading: the client's socket fills up
+            while (got < kFrames) {
+                auto f = c.read_frame();
+                if (!f) break;
+                ++got;
+            }
+            s.hold();
+        },
+        {.tls = GetParam().tls, .rcvbuf = 4096});
+    with_transport([&]<class T>() {
+        Client<T> client(busy(), {});
+        client.ws->connect(server.endpoint());
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.ws->is_open(); }));
+        set_client_send_buf(*client.ws, 4096);
+        const std::string payload(2000, 'o');
+        for (int i = 0; i < kFrames; ++i) ASSERT_EQ(client.ws->send_text(payload), WsSession<T>::SendStatus::Ok);
+        EXPECT_TRUE(run_until(client.loop, [&] { return got.load() == kFrames; }, 5000ms)) << got.load();
+        if constexpr (std::is_same_v<T, TlsStream>) {
+            EXPECT_EQ(client.ws->transport().pending_ciphertext(), 0u);
+        }
+    });
+}
+
+// Reconnecting from on_state while a server Close is being parsed: the rest of that input belongs
+// to the old connection and must not be applied to the new one's buffer
+TEST_P(TestWsSession, ReconnectFromACallbackDuringParsing) {
+    TestServer server(
+        [&](ServerConn& c, TestServer& s) {
+            c.accept_websocket();
+            if (s.accepted() == 1) {
+                // a text frame and a Close in one segment
+                c.write_all(ServerConn::frame(WsOpcode::Text, "a") +
+                            ServerConn::frame(WsOpcode::Close, std::string("\x03\xE8", 2)));
+                std::this_thread::sleep_for(200ms);
+                return;
+            }
+            c.send_frame(WsOpcode::Text, "b");
+            s.hold();
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client(busy(), {.auto_reconnect = false});
+        int disconnects = 0;
+        const Endpoint ep = server.endpoint();
+        client.ws->on_state([&](WsState st) {
+            if (st == WsState::Disconnected && ++disconnects == 1) client.ws->connect(ep);
+        });
+        client.ws->connect(ep);
+        EXPECT_TRUE(run_until(client.loop, [&] { return client.messages.size() >= 2; }));
+        EXPECT_EQ(client.messages, (std::vector<std::string>{"a", "b"}));
+        EXPECT_TRUE(client.ws->is_open());
+        EXPECT_EQ(server.accepted(), 2);
+    });
+}
+
+// close() must end in Disconnected even if the peer never reads what is queued
+TEST_P(TestWsSession, CloseWithFramesStuckBehindASlowPeer) {
+    auto never_reads = [] {
+        return std::make_unique<TestServer>([](ServerConn& c, TestServer& s) {
+            c.accept_websocket();
+            s.hold();
+        }, TestServer::Options{.tls = GetParam().tls, .rcvbuf = 4096});
+    };
+    with_transport([&]<class T>() {
+        // the queue completely full: the Close frame can't even be queued
+        {
+            auto server = never_reads();
+            Client<T> client(busy(), {});
+            client.ws->connect(server->endpoint());
+            ASSERT_TRUE(run_until(client.loop, [&] { return client.ws->is_open(); }));
+            set_client_send_buf(*client.ws, 4096);
+            const std::string payload(2000, 'o');
+            while (client.ws->send_text(payload) == WsSession<T>::SendStatus::Ok) {
+            }
+            client.ws->close();
+            EXPECT_TRUE(run_until(client.loop, [&] { return client.ws->state() == WsState::Disconnected; }, 500ms));
+        }
+        // a few frames stuck: Closing until close_timeout_ns
+        {
+            auto server = never_reads();
+            Client<T> client(busy(), {.close_timeout_ns = 200'000'000});
+            client.ws->connect(server->endpoint());
+            ASSERT_TRUE(run_until(client.loop, [&] { return client.ws->is_open(); }));
+            set_client_send_buf(*client.ws, 4096);
+            const std::string payload(2000, 'o');
+            for (int i = 0; i < 40; ++i) (void)client.ws->send_text(payload);
+            ASSERT_GT(client.ws->pending_frames(), 0u);
+            client.ws->close();
+            EXPECT_EQ(client.ws->state(), WsState::Closing);
+            EXPECT_TRUE(run_until(client.loop, [&] { return client.ws->state() == WsState::Disconnected; }, 2000ms));
+            EXPECT_EQ(client.ws->pending_frames(), 0u);
+        }
     });
 }
 

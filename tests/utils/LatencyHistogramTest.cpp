@@ -8,6 +8,8 @@
 #include <random>
 #include <vector>
 
+#include <pthread.h>
+
 using namespace quark;
 
 static_assert(std::is_same_v<LatencyHistogram, BasicLatencyHistogram<5>>);
@@ -46,9 +48,9 @@ TYPED_TEST(TestLatencyHistogram, PercentilesWithinTheDocumentedRelativeError) {
     std::sort(samples.begin(), samples.end());
     const double bound = 1.0 / TypeParam::kSubBuckets;  // the bucket width, relative
     for (const double p : {50.0, 90.0, 99.0, 99.9, 99.99}) {
-        // the sample at the same rank the histogram uses (rounded, as HdrHistogram does): with
-        // ceil(), p99.9 of 200000 lands one sample further because 99.9/100*200000 isn't exact
-        const auto rank = std::max<std::size_t>(1, static_cast<std::size_t>(samples.size() * p / 100 + 0.5));
+        // nearest rank, as the histogram defines it: ceil(n * p / 100), ignoring rounding noise
+        const auto rank =
+            std::max<std::size_t>(1, static_cast<std::size_t>(std::ceil(static_cast<double>(samples.size()) * p / 100 - 1e-6)));
         const auto exact = samples[rank - 1];
         const auto approx = h->percentile(p);
         EXPECT_GE(approx, exact) << "p" << p;  // never below the true value
@@ -72,4 +74,56 @@ TYPED_TEST(TestLatencyHistogram, ExtremesMergeAndReset) {
     EXPECT_LE(a->percentile(50), 100'000 + 100'000 / TypeParam::kSubBuckets + 1);
     a->reset();
     EXPECT_EQ(a->count(), 0u);
+}
+
+TYPED_TEST(TestLatencyHistogram, NearestRankNeverReportsBelowThePercentile) {
+    auto h = std::make_unique<TypeParam>();
+    h->record(10);
+    h->record(1000);
+    // 74% of 2 samples is 1.48 samples: the second one (a rounded rank would report 10, below
+    // which only 50% fall)
+    EXPECT_GE(h->percentile(74), 1000);
+    EXPECT_EQ(h->percentile(50), 10);
+    EXPECT_EQ(h->percentile(1), 10);
+    EXPECT_GE(h->percentile(100), 1000);
+    EXPECT_EQ(h->percentile(std::numeric_limits<double>::quiet_NaN()), 10);  // as p == 0: the min
+    EXPECT_EQ(h->percentile(-1), 10);
+    EXPECT_GE(h->percentile(1e9), 1000);
+}
+
+TYPED_TEST(TestLatencyHistogram, SingleSampleAndMergeIntoEmpty) {
+    auto h = std::make_unique<TypeParam>();
+    h->record(12345);
+    for (double p : {0.0, 1.0, 50.0, 99.99, 100.0}) {
+        EXPECT_GE(h->percentile(p), 12345) << p;
+        EXPECT_LE(h->percentile(p), 12345) << p;  // clamped to the exact max
+    }
+    auto empty = std::make_unique<TypeParam>();
+    empty->merge(*h);
+    EXPECT_EQ(empty->min(), 12345);
+    EXPECT_EQ(empty->max(), 12345);
+    auto other = std::make_unique<TypeParam>();
+    h->merge(*other);  // merging an empty one changes nothing
+    EXPECT_EQ(h->min(), 12345);
+    EXPECT_EQ(h->count(), 1u);
+}
+
+TYPED_TEST(TestLatencyHistogram, ResetNeedsNoStackSpace) {
+    // reset() of the 440 KiB <10> histogram must not build a temporary: run it on a 64 KiB stack
+    auto h = std::make_unique<TypeParam>();
+    h->record(42);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 64 * 1024);
+    pthread_t t;
+    ASSERT_EQ(pthread_create(&t, &attr, [](void* p) -> void* {
+        static_cast<TypeParam*>(p)->reset();
+        return nullptr;
+    }, h.get()), 0);
+    pthread_join(t, nullptr);
+    pthread_attr_destroy(&attr);
+    EXPECT_EQ(h->count(), 0u);
+    EXPECT_EQ(h->percentile(50), 0);
+    h->record(7);
+    EXPECT_EQ(h->min(), 7);
 }

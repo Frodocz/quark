@@ -1,6 +1,8 @@
 #include "quark/net/Url.h"
 #include "gtest/gtest.h"
 
+#include <string_view>
+
 using namespace quark::net;
 
 class TestUrl : public ::testing::Test {};
@@ -53,4 +55,30 @@ TEST_F(TestUrl, Rejects) {
     EXPECT_FALSE(parse_url("wss://user:pw@host/"));
     EXPECT_FALSE(parse_url("wss://[::1/"));
     EXPECT_FALSE(parse_url("wss://[::1]x/"));
+    EXPECT_FALSE(parse_url("wss://[]/"));
+    EXPECT_FALSE(parse_url("wss://host:-1/"));
+    EXPECT_FALSE(parse_url("wss://host:00000/"));
+    EXPECT_FALSE(parse_url("wss://h:80@evil/"));
+    EXPECT_FALSE(parse_url(""));
+    EXPECT_FALSE(parse_url("ws:/host"));
+    EXPECT_FALSE(parse_url("ws://"));
+}
+
+// host and target go verbatim into the request line and Host header
+TEST_F(TestUrl, RejectsSpacesAndControlCharacters) {
+    EXPECT_FALSE(parse_url("ws://host/a\r\nX-Injected: 1"));
+    EXPECT_FALSE(parse_url("ws://ho st/"));
+    EXPECT_FALSE(parse_url("ws://host/a b"));
+    EXPECT_FALSE(parse_url("ws://host/\x7f"));
+    EXPECT_FALSE(parse_url(std::string_view("ws://host/\0x", 13)));
+    EXPECT_TRUE(parse_url("ws://host/a%20b?x=1"));  // percent-encoded is fine
+}
+
+TEST_F(TestUrl, PortAndFragmentEdges) {
+    EXPECT_EQ(parse_url("ws://host:080")->port, 80);
+    EXPECT_EQ(parse_url("ws://host:65535")->port, 65535);
+    EXPECT_EQ(parse_url("ws://[::1]")->port, 80);
+    EXPECT_EQ(parse_url("ws://host#frag")->target, "/");
+    EXPECT_EQ(parse_url("ws://host?x#frag")->target, "/?x");
+    EXPECT_EQ(parse_url("wss://host/p?email=a@b")->host, "host");  // '@' in the query is not user info
 }

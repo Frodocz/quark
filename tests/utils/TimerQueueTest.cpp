@@ -8,7 +8,11 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <functional>
+#include <limits>
 #include <random>
+#include <string>
+#include <vector>
 
 // Counts heap allocations so tests can check the hot path doesn't allocate.
 #if defined(__GNUC__) && !defined(__clang__)
@@ -366,4 +370,92 @@ TEST_F(TestTimerQueue, NoHeapAllocationInSteadyState) {
     }
     EXPECT_EQ(g_heap_allocs.load() - before, 0);
     EXPECT_GT(sum, 0);
+}
+
+TEST_F(TestTimerQueue, RepeatingTaskStopsWhenItsNextSlotWouldOverflow) {
+    // poll(INT64_MAX) is the "fire everything due" idiom: the next slot can't be represented
+    TimerQueue tq;
+    int count = 0;
+    tq.add_task("r", [&]() { ++count; return true; }, 10'000, 10'000);
+    EXPECT_EQ(tq.poll(std::numeric_limits<int64_t>::max()), 1);
+    EXPECT_EQ(count, 1);
+    EXPECT_TRUE(tq.empty());
+    EXPECT_EQ(tq.next_expiry_ns(), std::numeric_limits<int64_t>::max());
+
+    // the last representable slot still fires, then the task stops
+    const int64_t interval = 1'000'000;
+    const int64_t when = std::numeric_limits<int64_t>::max() - interval;
+    EXPECT_TRUE(tq.add_task("edge", [&]() { ++count; return true; }, when, interval));
+    EXPECT_EQ(tq.poll(when), 1);
+    EXPECT_EQ(tq.next_expiry_ns(), std::numeric_limits<int64_t>::max());  // when + interval
+    EXPECT_EQ(tq.poll(std::numeric_limits<int64_t>::max()), 1);
+    EXPECT_TRUE(tq.empty());
+    EXPECT_EQ(count, 3);
+}
+
+TEST_F(TestTimerQueue, TaskAddedDueFromACallbackRunsInTheNextPoll) {
+    // a callback rescheduling itself "now" (retry asap) must not keep poll() from returning
+    TimerQueue tq;
+    int runs = 0;
+    std::function<bool()> retry = [&]() {
+        ++runs;
+        tq.add_task("retry", retry, 0);
+        return false;
+    };
+    tq.add_task("retry", retry, 100);
+    EXPECT_EQ(tq.poll(1'000), 1);
+    EXPECT_EQ(runs, 1);
+    EXPECT_EQ(tq.poll(1'000), 0);  // deferred to after this poll's now
+    EXPECT_EQ(tq.poll(1'001), 1);
+    EXPECT_EQ(runs, 2);
+
+    // tasks already due before the callback ran still fire in the same poll, in order
+    TimerQueue tq2;
+    std::vector<std::string> events;
+    tq2.add_task("a", [&]() {
+        events.push_back("a");
+        tq2.add_task("late", [&]() { events.push_back("late"); return false; }, 0);
+        return false;
+    }, 100);
+    tq2.add_task("b", [&]() { events.push_back("b"); return false; }, 200);
+    EXPECT_EQ(tq2.poll(300), 2);
+    EXPECT_EQ(events, (std::vector<std::string>{"a", "b"}));
+    EXPECT_EQ(tq2.poll(301), 1);
+    EXPECT_EQ(events.back(), "late");
+
+    // poll(INT64_MAX) can't defer past now: it stops at tasks added during it
+    TimerQueue tq3;
+    int max_runs = 0;
+    std::function<bool()> again = [&]() {
+        ++max_runs;
+        tq3.add_task("again", again, std::numeric_limits<int64_t>::max());
+        return false;
+    };
+    tq3.add_task("again", again, 5);
+    EXPECT_EQ(tq3.poll(std::numeric_limits<int64_t>::max()), 1);
+    EXPECT_EQ(max_runs, 1);
+}
+
+TEST_F(TestTimerQueue, LongNamesDoNotAllocate) {
+    TimerQueue tq;
+    tq.reserve(64);
+    int64_t now = 1'000;
+    const long before = g_heap_allocs.load();
+    for (int i = 0; i < 1'000; ++i) {
+        now += 10;
+        (void)tq.add_task("a_timer_name_well_beyond_the_small_string_size_of_std_string",
+                          [] { return false; }, now);
+        tq.poll(now);
+    }
+    EXPECT_EQ(g_heap_allocs.load() - before, 0);
+}
+
+TEST_F(TestTimerQueue, CancelRejectsForeignAndOutOfRangeIds) {
+    TimerQueue a, b;
+    const TimerId id = a.add_task("x", [] { return false; }, 100);
+    EXPECT_FALSE(b.cancel(id));                                   // not b's
+    EXPECT_FALSE(a.cancel(TimerId{id.uid, id.slot + 1'000'000}));  // slot out of range
+    EXPECT_FALSE(a.cancel(TimerId{id.uid + 1, id.slot}));         // stale / unknown uid
+    EXPECT_TRUE(a.cancel(id));
+    EXPECT_FALSE(a.cancel(id));
 }

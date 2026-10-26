@@ -20,6 +20,11 @@ TEST_F(TestSystem, CpuListParsing) {
     EXPECT_FALSE(cpu_list_contains("", 0));
     EXPECT_FALSE(cpu_list_contains("\n", 0));
     EXPECT_FALSE(cpu_list_contains("x-3,5-2", 4));  // malformed items are ignored
+    EXPECT_FALSE(cpu_list_contains("99999999999", 0));          // too large: ignored, no overflow
+    EXPECT_FALSE(cpu_list_contains("0-99999999999", 5));
+    EXPECT_TRUE(cpu_list_contains("99999999999,5", 5));
+    EXPECT_FALSE(cpu_list_contains("3-,-3", 3));                // open ranges are malformed
+    EXPECT_TRUE(cpu_list_contains(",,4,", 4));                  // empty items skipped
 }
 
 TEST_F(TestSystem, PinThreadToCpu) {
@@ -72,6 +77,29 @@ TEST_F(TestSystem, CrashHandlerPrintsTheSignalAndABacktrace) {
         {
             install_crash_handler();
             std::raise(SIGSEGV);
+        },
+        "fatal signal SEGV, backtrace:");
+}
+
+namespace {
+// never reached, but the compiler can't know (a volatile read), so this isn't flagged by
+// -Winfinite-recursion (GCC 12+)
+volatile int g_overflow_limit = -1;
+
+// recursion the optimizer can't turn into a loop
+QUARK_NOINLINE int overflow_stack(int depth) {
+    if (depth == g_overflow_limit) return 0;
+    volatile char pad[4096];
+    pad[0] = static_cast<char>(depth);
+    return overflow_stack(depth + 1) + pad[0];
+}
+}  // namespace
+
+TEST_F(TestSystem, CrashHandlerReportsAStackOverflow) {
+    EXPECT_DEATH(
+        {
+            install_crash_handler();
+            (void)overflow_stack(0);
         },
         "fatal signal SEGV, backtrace:");
 }

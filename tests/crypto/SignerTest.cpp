@@ -3,10 +3,19 @@
 #include "quark/QuarkError.h"
 #include "gtest/gtest.h"
 
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+
+#include <fcntl.h>
+#include <stdlib.h>
+#include <unistd.h>
+
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using namespace quark;
@@ -148,5 +157,57 @@ TEST_F(TestEd25519Signer, RejectsBadKeys) {
         FAIL() << "expected QuarkError";
     } catch (const QuarkError& e) {
         EXPECT_NE(std::string_view(e.what()).find("not an Ed25519 key"), std::string_view::npos) << e.what();
+    }
+}
+
+// An encrypted key must fail at once: OpenSSL's default passphrase callback would prompt on the
+// controlling terminal and block. The child gets a pseudo-terminal as its controlling tty, so a
+// prompt really would block there; a watchdog thread turns that into a failure (not SIGALRM:
+// OpenSSL's prompt catches it and keeps waiting).
+TEST_F(TestEd25519Signer, EncryptedPemFailsWithoutPrompting) {
+    constexpr std::string_view kEncryptedPem =
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+        "MIGbMFcGCSqGSIb3DQEFDTBKMCkGCSqGSIb3DQEFDDAcBAjnK+i7GqHiKAICCAAw\n"
+        "DAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEEKadC4iCJEEaNZDcXym/CUoEQMqc\n"
+        "uLNp7j0Zmwq5sLRxt0Wj4dqI+4aycqVx1indZogZmUIM72Aj5kceOvSOkvb2/SIk\n"
+        "eTOcMTzNgVUL1w7zlfw=\n"
+        "-----END ENCRYPTED PRIVATE KEY-----\n";
+    EXPECT_EXIT(
+        {
+            ::setsid();
+            const int master = ::posix_openpt(O_RDWR);
+            if (master < 0 || ::grantpt(master) != 0 || ::unlockpt(master) != 0) std::_Exit(3);
+            const int slave = ::open(::ptsname(master), O_RDWR);  // becomes the controlling tty
+            if (slave < 0) std::_Exit(4);
+            std::thread([] {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                std::_Exit(2);  // blocked in a prompt
+            }).detach();
+            try {
+                (void)Ed25519Signer::from_pem(kEncryptedPem);
+            } catch (const QuarkError&) {
+                std::_Exit(0);
+            }
+            std::_Exit(1);
+        },
+        ::testing::ExitedWithCode(0), "");
+}
+
+// keys at the SHA-256 block size boundary (64 bytes is used as is, 65 is hashed first)
+TEST_F(TestHmacSha256, KeysAroundTheBlockSize) {
+    for (const std::size_t key_len : {1, 63, 64, 65, 200}) {  // empty keys are rejected
+        const std::string key(key_len, 'k');
+        for (const std::string_view msg : {std::string_view{}, std::string_view{"x"}, std::string_view{"payload=1&ts=2"}}) {
+            unsigned char want[32];
+            unsigned int want_len = 0;
+            ::HMAC(::EVP_sha256(), key.data(), static_cast<int>(key.size()),
+                   reinterpret_cast<const unsigned char*>(msg.data()), msg.size(), want, &want_len);
+            ASSERT_EQ(want_len, 32u);
+            HmacSha256 h(key);
+            const auto got = h.sign(msg);
+            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(got.data()), 32),
+                      std::string_view(reinterpret_cast<const char*>(want), 32))
+                << "key " << key_len << " msg '" << msg << "'";
+        }
     }
 }

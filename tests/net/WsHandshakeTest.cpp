@@ -64,4 +64,17 @@ TEST_F(TestWsHandshake, AcceptsOnlyAMatching101) {
     EXPECT_EQ(limited.status, 429);
 
     EXPECT_FALSE(parse_ws_upgrade_response(bytes("garbage\r\n\r\n"), kAccept).accepted);
+
+    // a 4-digit "status" isn't 101
+    const std::string four_digits = "HTTP/1.1 1010 Switching\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: " +
+                                    kAccept + "\r\n\r\n";
+    EXPECT_FALSE(parse_ws_upgrade_response(bytes(four_digits), kAccept).accepted);
+    // an extension that was never offered (frames would be compressed)
+    const std::string deflate = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                                "Sec-WebSocket-Extensions: permessage-deflate\r\nSec-WebSocket-Accept: " + kAccept + "\r\n\r\n";
+    EXPECT_FALSE(parse_ws_upgrade_response(bytes(deflate), kAccept).accepted);
+    // no space after the colon is still a valid header
+    const std::string tight = "HTTP/1.1 101 Switching Protocols\r\nUpgrade:websocket\r\nSec-WebSocket-Accept:" + kAccept +
+                              "\r\n\r\n";
+    EXPECT_TRUE(parse_ws_upgrade_response(bytes(tight), kAccept).accepted);
 }

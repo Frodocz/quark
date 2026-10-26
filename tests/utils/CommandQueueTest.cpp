@@ -33,6 +33,47 @@ TEST_F(TestCommandQueue, ReleasesCapturedStateAfterRunning) {
     EXPECT_EQ(token.use_count(), 1);
 }
 
+TEST_F(TestCommandQueue, NestedDrainDoesNotRerunTheRunningCommand) {
+    CommandQueue<4> q;
+    int runs = 0, later = 0;
+    std::size_t nested = 99;
+    ASSERT_TRUE(q.post([&] {
+        ++runs;
+        nested = q.drain();
+    }));
+    ASSERT_TRUE(q.post([&] { ++later; }));
+    EXPECT_EQ(q.drain(), 2u);
+    EXPECT_EQ(runs, 1);
+    EXPECT_EQ(nested, 0u);
+    EXPECT_EQ(later, 1);
+    // indices stayed consistent: the queue still fills to exactly its size
+    for (int i = 0; i < 4; ++i) EXPECT_TRUE(q.post([] {}));
+    EXPECT_FALSE(q.post([] {}));
+    EXPECT_EQ(q.drain(), 4u);
+}
+
+TEST_F(TestCommandQueue, DrainZeroRunsNothing) {
+    CommandQueue<4> q;
+    int runs = 0;
+    ASSERT_TRUE(q.post([&] { ++runs; }));
+    EXPECT_EQ(q.drain(0), 0u);
+    EXPECT_EQ(runs, 0);
+    EXPECT_EQ(q.drain(), 1u);
+}
+
+TEST_F(TestCommandQueue, WrapsAroundManyTimes) {
+    CommandQueue<4> q;
+    int64_t sum = 0;
+    for (int i = 0; i < 10'000; ++i) {
+        ASSERT_TRUE(q.post([&sum, i] { sum += i; }));
+        if (i % 3 == 2) {
+            EXPECT_EQ(q.drain(), 3u);
+        }
+    }
+    q.drain();
+    EXPECT_EQ(sum, int64_t{10'000} * 9'999 / 2);
+}
+
 TEST_F(TestCommandQueue, CrossThreadHandoff) {
     constexpr int kCommands = 200'000;
     CommandQueue<1024> q;

@@ -34,9 +34,13 @@ function(quark_add_test test_target source_file)
     gtest_discover_tests(${test_target} DISCOVERY_MODE PRE_TEST)
 endfunction()
 
+# core: configuration and logging
+quark_add_test(quark_test_config_log core/ConfigLogTest.cpp)
+
 # crypto
 quark_add_test(quark_test_encoding crypto/EncodingTest.cpp)
 quark_add_test(quark_test_crypto crypto/SignerTest.cpp)
+target_link_libraries(quark_test_crypto PRIVATE OpenSSL::Crypto)  # reference HMAC values
 
 # maths
 quark_add_test(quark_test_double_ops math/DoubleOpsTest.cpp)
@@ -73,12 +77,14 @@ else ()
 endif ()
 
 # utils
+quark_add_test(quark_test_circular_buffer utils/CircularBufferTest.cpp)
 quark_add_test(quark_test_command_queue utils/CommandQueueTest.cpp)
 quark_add_test(quark_test_hw_endian utils/HwEndianTest.cpp)
 quark_add_test(quark_test_inplace_function utils/InplaceFunctionTest.cpp)
 quark_add_test(quark_test_json_parser utils/JsonParserTest.cpp)
 quark_add_test(quark_test_latency_histogram utils/LatencyHistogramTest.cpp)
 quark_add_test(quark_test_memory_arena utils/MemoryArenaTest.cpp)
+quark_add_test(quark_test_mmap_file utils/MMapFileTest.cpp)
 quark_add_test(quark_test_simple_object_pool utils/SimpleObjectPoolTest.cpp)
 quark_add_test(quark_test_system utils/SystemTest.cpp)
 quark_add_test(quark_test_timer_queue utils/TimerQueueTest.cpp)

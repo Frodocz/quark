@@ -52,6 +52,41 @@ TEST_F(TestTcpSocket, BindsTheChosenLocalIp) {
     EXPECT_EQ(server.last_peer_ip(), "127.0.0.2");
 }
 
+TEST_F(TestTcpSocket, NeverConnectedIsNotConnecting) {
+    TcpSocket s;
+    EXPECT_EQ(s.poll_open(), StreamPhase::Closed);
+    EXPECT_EQ(s.fd(), -1);
+}
+
+TEST_F(TestTcpSocket, UnsetEndpointIsRefused) {
+    // 0.0.0.0 would reach a local service: an unresolved endpoint must not connect
+    TestServer server([](ServerConn&, TestServer& s) { s.hold(); });
+    TcpSocket s;
+    EXPECT_FALSE(s.connect(Endpoint{0, server.endpoint().port_be}));
+    EXPECT_EQ(s.poll_open(), StreamPhase::Failed);
+    EXPECT_EQ(s.fd(), -1);
+}
+
+TEST_F(TestTcpSocket, PeerCloseReadsEofAndWriteAfterCloseFails) {
+    TestServer server([](ServerConn&, TestServer&) {});  // accepts, then closes
+    TcpSocket s;
+    ASSERT_TRUE(s.connect(server.endpoint()));
+    ASSERT_EQ(open_within(s), StreamPhase::Open);
+    uint8_t buf[16];
+    sys::io_result n = -EAGAIN;
+    const auto deadline = std::chrono::steady_clock::now() + 2000ms;
+    while (n == -EAGAIN && std::chrono::steady_clock::now() < deadline) n = s.read(buf);
+    EXPECT_EQ(n, 0);
+    // writing into the closed connection: an error, never SIGPIPE
+    const uint8_t data[64]{};
+    sys::io_result w = 0;
+    for (int i = 0; i < 100 && w >= 0; ++i) w = s.write(data, false);
+    EXPECT_LT(w, 0);
+    EXPECT_NE(w, -EAGAIN);
+    s.close();
+    EXPECT_LT(s.read(buf), 0);  // -EBADF on a closed socket
+}
+
 TEST_F(TestTcpSocket, ConnectionRefusedFails) {
     uint16_t closed_port;
     {

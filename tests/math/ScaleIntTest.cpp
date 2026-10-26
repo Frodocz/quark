@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <iomanip>
 #include <limits>
 #include <random>
 #include <string>
@@ -1066,3 +1068,75 @@ TEST_F(TestScaleInt, TestEqualsRoundedVsEquals) {
     EXPECT_TRUE(equals(100.0, 100.004, {.rel = 0.0, .abs = 0.005}));
     EXPECT_FALSE(equals_rounded(100.0, 100.004));
 }
+
+// to_raw() is llround(v * 10^SCALE): no double rounding just below a half, and exact for scaled
+// values in [2^52, 2^53) where adding 0.5 would round an odd integer up
+TEST_F(TestScaleInt, TestToRawMatchesLlround) {
+    EXPECT_EQ(ScaleInt<1>(std::nextafter(0.5, 0.0) / 10).get_raw(), 0);
+    EXPECT_EQ(DoubleE13(std::nextafter(0.5, 0.0) / 1e13).get_raw(), 0);
+    EXPECT_EQ(DoubleE8(45035996.273704968).get_raw(), 4503599627370497);
+    EXPECT_EQ(DoubleE13(500.0000000000001).get_raw(), 5000000000000001);
+    EXPECT_EQ(DoubleE4(-0.00005).get_raw(), -1);  // ties still away from zero
+    EXPECT_EQ(DoubleE4(0.00005).get_raw(), 1);
+
+    std::mt19937_64 rng(7);
+    std::uniform_real_distribution<double> exponent(-16, 18);
+    for (int i = 0; i < 1'000'000; ++i) {
+        double v = std::pow(10.0, exponent(rng)) / DoubleE8::SCALE_AS_DOUBLE;
+        if (i & 1) v = -v;
+        if (!(std::abs(v) < DoubleE8::MAX_ABS_DOUBLE)) continue;
+        ASSERT_EQ(DoubleE8::to_raw(v), std::llround(v * DoubleE8::SCALE_AS_DOUBLE)) << std::setprecision(17) << v;
+    }
+}
+
+// px * 1.5 would silently truncate the factor to 1
+static_assert(!std::is_invocable_v<std::multiplies<>, DoubleE8, double>);
+static_assert(!std::is_invocable_v<std::multiplies<>, double, DoubleE8>);
+static_assert(!std::is_invocable_v<std::multiplies<>, DoubleE8, float>);
+static_assert(std::is_invocable_v<std::multiplies<>, DoubleE8, int64_t>);
+static_assert(std::is_invocable_v<std::multiplies<>, int, DoubleE8>);
+
+TEST_F(TestScaleInt, TestTickSizeTryFromDouble) {
+    TickSize<8> t = TickSize<8>::from_raw(1);
+    EXPECT_TRUE(TickSize<8>::try_from_double(0.01, t));
+    EXPECT_EQ(t.raw(), 1'000'000);
+    EXPECT_TRUE(TickSize<8>::try_from_double(0.0005, t));
+    EXPECT_EQ(t.raw(), 50'000);
+    EXPECT_TRUE(TickSize<8>::try_from_double(1e-8, t));
+    EXPECT_EQ(t.raw(), 1);
+
+    const TickSize<8> before = t;
+    for (double bad : {1e-10, 1.5e-8, 0.0, -0.01, std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::infinity(), 1e300}) {
+        EXPECT_FALSE(TickSize<8>::try_from_double(bad, t)) << bad;
+        EXPECT_EQ(t.raw(), before.raw());  // untouched
+    }
+    TickSize<4> t4 = TickSize<4>::from_raw(1);
+    EXPECT_FALSE(TickSize<4>::try_from_double(0.00005, t4));  // half a unit at E4
+}
+
+TEST_F(TestScaleInt, TestPerCallTickOutOfRangeLeavesValueUnchanged) {
+    for (double bad : {1e6 * 1e300, 1e300, -1e300, std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::infinity(), 1e-12}) {
+        DoubleE8 x(1.25);
+        x.floor_to_tick(bad);
+        x.ceil_to_tick(bad);
+        x.round_to_tick(bad);
+        EXPECT_EQ(x.get_raw(), 125'000'000) << bad;
+    }
+    // a valid but large lot size still rounds
+    EXPECT_EQ(DoubleE8(3.0).floor_to_tick(1e6).get_raw(), 0);
+    EXPECT_EQ(math::round_to_tick(3.0, 1e300), 3.0);
+    EXPECT_EQ(math::round_to_tick(0.0, 1e6), 0.0);
+}
+
+#ifdef NDEBUG
+// release builds: a tick finer than one unit rounds nothing instead of dividing by zero
+TEST_F(TestScaleInt, TestTickSizeBelowOneUnitIsHarmlessInRelease) {
+    const TickSize<8> t(1e-10);
+    EXPECT_EQ(t.raw(), 1);
+    DoubleE8 x(1.23456789);
+    x.floor_to_tick(t);
+    EXPECT_EQ(x.get_raw(), 123'456'789);
+}
+#endif

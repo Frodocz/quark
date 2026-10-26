@@ -135,3 +135,28 @@ TEST_F(TestEndpoint, LocalAddressHelpers) {
     ASSERT_TRUE(src);
     EXPECT_EQ(src->to_string(), "127.0.0.1:0");
 }
+
+// A blocking wait must end at the next timer, and timers must see the time after the wait
+TEST(TestEventLoopPoller, TimersFireOnTimeWithALongPollTimeout) {
+    EventLoop loop({.busy_poll = false, .poll_timeout_ns = 100'000'000});  // 100 ms
+    int64_t fired_at = 0;
+    const int64_t start = RdtscClock::tscns();
+    loop.timers().add_task("t", [&] { fired_at = RdtscClock::tscns(); return false; }, start + 10'000'000);
+    int steps = 0;
+    while (fired_at == 0 && RdtscClock::tscns() - start < 1'000'000'000) {
+        loop.step();
+        ++steps;
+    }
+    ASSERT_NE(fired_at, 0);
+    EXPECT_LT(fired_at - start, 60'000'000);  // ~10 ms; before the fix up to 2x the poll timeout
+    EXPECT_LE(steps, 3);
+}
+
+TEST(TestEventLoopPoller, InfiniteTimeoutStillWakesForTimers) {
+    EventLoop loop({.busy_poll = false, .poll_timeout_ns = -1});
+    bool fired = false;
+    loop.timers().add_task("t", [&] { fired = true; return false; }, RdtscClock::tscns() + 5'000'000);
+    const int64_t start = RdtscClock::tscns();
+    while (!fired && RdtscClock::tscns() - start < 1'000'000'000) loop.step();
+    EXPECT_TRUE(fired);
+}

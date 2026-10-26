@@ -160,5 +160,74 @@ TEST_P(TestHttpClient, RequestTimeoutReportsAnError) {
     });
 }
 
+// Inside on_response of a Connection: close response the client is already done with that
+// connection: a request submitted there is refused (NotReady) rather than silently lost
+TEST_P(TestHttpClient, RequestFromTheCallbackOfAClosingResponse) {
+    TestServer server(
+        [](ServerConn& c, TestServer& s) {
+            serve(c, s, {"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"}, false);
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client;
+        HttpSubmit chained = HttpSubmit::Ok;
+        client.http->on_response([&](const HttpResponseView& r) {
+            client.responses.emplace_back(r.status, "");
+            if (client.responses.size() == 1) chained = client.get("/second");
+        });
+        client.http->connect(server.endpoint());
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.http->ready(); }));
+        ASSERT_EQ(client.get("/first"), HttpSubmit::Ok);
+        ASSERT_TRUE(run_until(client.loop, [&] { return !client.responses.empty(); }));
+        EXPECT_EQ(chained, HttpSubmit::NotReady);
+        // reconnected right away, and usable again
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.http->ready(); }));
+        EXPECT_EQ(client.get("/third"), HttpSubmit::Ok);
+        EXPECT_TRUE(run_until(client.loop, [&] { return client.responses.size() == 2; }));
+        EXPECT_EQ(client.errors, 0);
+    });
+}
+
+// A server that closes after every response is not failing: no growing reconnect delays
+TEST_P(TestHttpClient, ServerClosingAfterEveryResponseIsNotBackedOff) {
+    TestServer server(
+        [](ServerConn& c, TestServer& s) {
+            serve(c, s, {"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"}, false);
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client({.reconnect_initial_ns = 200'000'000});  // would add up to seconds
+        client.http->connect(server.endpoint());
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 5; ++i) {
+            ASSERT_TRUE(run_until(client.loop, [&] { return client.http->ready(); })) << i;
+            ASSERT_EQ(client.get("/x"), HttpSubmit::Ok);
+            ASSERT_TRUE(run_until(client.loop, [&] { return client.responses.size() == static_cast<std::size_t>(i + 1); }));
+        }
+        EXPECT_LT(std::chrono::steady_clock::now() - start, 1000ms);
+        EXPECT_EQ(client.errors, 0);
+    });
+}
+
+// No Content-Length, not chunked: the body ends with the connection
+TEST_P(TestHttpClient, CloseDelimitedBodyIsDeliveredAtEof) {
+    TestServer server(
+        [](ServerConn& c, TestServer&) {
+            if (c.read_until("\r\n\r\n").empty()) return;
+            c.write_all(std::string_view("HTTP/1.1 200 OK\r\n\r\n{\"bids\":[]}"));
+        },  // returns: closes the connection
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client({.auto_reconnect = false});
+        client.http->connect(server.endpoint());
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.http->ready(); }));
+        ASSERT_EQ(client.get("/depth"), HttpSubmit::Ok);
+        ASSERT_TRUE(run_until(client.loop, [&] { return !client.responses.empty() || client.errors > 0; }));
+        ASSERT_EQ(client.responses.size(), 1u);
+        EXPECT_EQ(client.responses[0], (std::pair<int, std::string>{200, "{\"bids\":[]}"}));
+        EXPECT_EQ(client.errors, 0);
+    });
+}
+
 INSTANTIATE_TEST_SUITE_P(Transports, TestHttpClient, ::testing::Values(false, true),
                          [](const auto& info) { return info.param ? "Tls" : "Tcp"; });

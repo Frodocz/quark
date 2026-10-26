@@ -208,3 +208,34 @@ TEST_F(TestTlsStream, ReconnectResumesTheSession) {
     ASSERT_EQ(open_within(s), StreamPhase::Open);
     EXPECT_TRUE(s.session_resumed());
 }
+
+// a session belongs to the host it was negotiated with: not offered to another one
+TEST_F(TestTlsStream, SessionIsNotResumedForAnotherHost) {
+    TestServer server(
+        [](ServerConn& c, TestServer&) {
+            c.write_all(std::string_view("hi"));
+            char buf[16];
+            (void)c.read_some(buf, sizeof(buf));
+        },
+        {.tls = true});
+    TlsContext ctx(trusting_test_ca());
+    TlsStream s;
+    s.set_context(ctx);
+    s.set_hostname("localhost");
+    ASSERT_TRUE(s.connect(server.endpoint()));
+    ASSERT_EQ(open_within(s), StreamPhase::Open);
+    EXPECT_EQ(read_all_available(s, 2), "hi");
+    s.close();
+
+    s.set_hostname("127.0.0.1");  // also in the test certificate
+    ASSERT_TRUE(s.connect(server.endpoint()));
+    ASSERT_EQ(open_within(s), StreamPhase::Open);
+    EXPECT_FALSE(s.session_resumed());
+    EXPECT_EQ(read_all_available(s, 2), "hi");
+    s.close();
+
+    s.set_hostname("127.0.0.1");  // unchanged: resumes the session of the last connection
+    ASSERT_TRUE(s.connect(server.endpoint()));
+    ASSERT_EQ(open_within(s), StreamPhase::Open);
+    EXPECT_TRUE(s.session_resumed());
+}

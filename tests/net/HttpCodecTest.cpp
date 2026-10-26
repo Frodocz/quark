@@ -86,3 +86,80 @@ TEST_F(TestHttpCodec, Malformed) {
         EXPECT_FALSE(r.keep_alive);
     }
 }
+
+TEST_F(TestHttpCodec, MalformedFraming) {
+    for (const char* bad : {"HTTP/1.1 2000 OK\r\nContent-Length: 0\r\n\r\n",                    // 4-digit status
+                            "HTTP/1.1 200OK\r\nContent-Length: 0\r\n\r\n",                       // no space after it
+                            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nokXX0\r\n\r\n",  // no CRLF after data
+                            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+                            "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nxx"}) {
+        auto b = buf(bad);
+        auto r = parse_http_response(b);
+        EXPECT_TRUE(r.complete && r.malformed) << bad;
+    }
+}
+
+TEST_F(TestHttpCodec, TransferEncodingIsCaseInsensitive) {
+    auto b = buf("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n");
+    auto r = parse_http_response(b);
+    ASSERT_TRUE(r.complete);
+    EXPECT_FALSE(r.malformed);
+    EXPECT_EQ(body_of(r), "ok");
+}
+
+TEST_F(TestHttpCodec, InterimResponsesAreSkipped) {
+    const std::string_view text = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n"
+                                  "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokNEXT";
+    auto b = buf(text);
+    auto r = parse_http_response(b);
+    ASSERT_TRUE(r.complete);
+    EXPECT_FALSE(r.malformed);
+    EXPECT_EQ(r.status, 200);
+    EXPECT_EQ(body_of(r), "ok");
+    EXPECT_EQ(r.consumed, text.size() - 4);
+
+    auto partial = buf("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Le");
+    EXPECT_FALSE(parse_http_response(partial).complete);
+}
+
+TEST_F(TestHttpCodec, CloseDelimitedBody) {
+    auto b = buf("HTTP/1.1 200 OK\r\nServer: x\r\n\r\n{\"bids\":[]}");
+    auto r = parse_http_response(b);
+    EXPECT_FALSE(r.complete);  // only the close ends it
+    EXPECT_TRUE(r.close_delimited);
+    EXPECT_FALSE(r.keep_alive);
+    EXPECT_EQ(body_of(r), "{\"bids\":[]}");
+
+    for (const char* empty : {"HTTP/1.1 204 No Content\r\n\r\n", "HTTP/1.1 304 Not Modified\r\n\r\n"}) {
+        auto e = buf(empty);
+        auto er = parse_http_response(e);
+        EXPECT_TRUE(er.complete) << empty;  // no body by definition
+        EXPECT_FALSE(er.close_delimited) << empty;
+        EXPECT_TRUE(er.body.empty()) << empty;
+    }
+}
+
+TEST_F(TestHttpCodec, ChunkedSplitAtEveryByte) {
+    const std::string text = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                             "5;ext=1\r\nhello\r\n1\r\n \r\n5\r\nworld\r\n0\r\nTrailer: x\r\n\r\n";
+    for (std::size_t cut = 0; cut < text.size(); ++cut) {
+        auto b = buf(std::string_view(text).substr(0, cut));
+        const auto before = b;
+        auto r = parse_http_response(b);
+        EXPECT_FALSE(r.complete) << cut;
+        EXPECT_EQ(b, before) << cut;  // untouched until every chunk is there
+    }
+    auto b = buf(text);
+    auto r = parse_http_response(b);
+    ASSERT_TRUE(r.complete);
+    EXPECT_EQ(body_of(r), "hello world");
+    EXPECT_EQ(r.consumed, text.size());
+}
+
+TEST_F(TestHttpCodec, BodylessPostCarriesContentLength) {
+    char out[256];
+    const std::size_t n = build_http_request(out, HttpMethod::Post, "h", "/listenKey", {}, {});
+    EXPECT_EQ(std::string_view(out, n), "POST /listenKey HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n");
+    const std::size_t d = build_http_request(out, HttpMethod::Delete, "h", "/x", {}, {});
+    EXPECT_EQ(std::string_view(out, d), "DELETE /x HTTP/1.1\r\nHost: h\r\n\r\n");
+}

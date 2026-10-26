@@ -60,7 +60,11 @@ Check: `ethtool -c ens5`, `grep ens5 /proc/interrupts` (counts should only grow 
 
 ## 4. Kernel busy polling (kernel sockets)
 
-In busy-poll mode quark calls `recv()` on every connection each step. With
+In busy-poll mode quark calls `recv()` on every connection each step: an idle connection costs
+one syscall per step (~630 ns measured on a Xeon 8259CL VM with the default mitigations), while
+epoll mode pays one `epoll_wait()` per step (~550 ns) however many connections are idle. So
+busy-poll the few latency-critical connections (one loop each) and put the many mostly idle
+ones (e.g. market data fan-in) on an epoll-mode loop. With
 `sysctl net.core.busy_read=50` (microseconds) the kernel also polls the NIC queue inside that
 `recv()` instead of waiting for the interrupt and softirq, which can cut receive latency; the
 benefit depends on the driver and traffic, so measure it. `net.core.busy_poll` does the same for
