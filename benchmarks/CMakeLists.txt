@@ -30,11 +30,31 @@ endfunction()
 quark_add_benchmark(quark_bench_buffer_pool net/BufferPoolBench.cpp)
 quark_add_benchmark(quark_bench_simple_object_pool net/SimpleObjectPoolBench.cpp)
 quark_add_benchmark(quark_bench_loop_utils utils/LoopUtilsBench.cpp)
+quark_add_benchmark(quark_bench_utils utils/UtilsBench.cpp)
+target_compile_definitions(quark_bench_utils PRIVATE QUARK_BENCH_DATA_DIR="${PROJECT_SOURCE_DIR}/tests")
+quark_add_benchmark(quark_bench_codec net/CodecBench.cpp)
+quark_add_benchmark(quark_bench_crypto crypto/CryptoBench.cpp)
+quark_add_benchmark(quark_bench_math math/MathBench.cpp)
 
 # reuses the loopback servers and test certificate of the net tests (kernel sockets)
 if (NOT QUARK_USE_FSTACK)
+    quark_add_benchmark(quark_bench_event_loop net/EventLoopBench.cpp)
     quark_add_benchmark(quark_bench_ws_session net/WsSessionBench.cpp)
     target_include_directories(quark_bench_ws_session PRIVATE ${PROJECT_SOURCE_DIR}/tests/net)
     target_compile_definitions(quark_bench_ws_session PRIVATE QUARK_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests")
     target_link_libraries(quark_bench_ws_session PRIVATE OpenSSL::SSL)
 endif ()
+
+# hash container comparison: std vs absl (a quark dependency) vs ankerl::unordered_dense (fetched
+# for this benchmark only, header-only)
+FetchContent_Declare(
+    unordered_dense
+    GIT_REPOSITORY https://github.com/martinus/unordered_dense.git
+    GIT_TAG        v4.5.0
+)
+FetchContent_MakeAvailable(unordered_dense)
+quark_add_benchmark(quark_bench_containers utils/ContainerBench.cpp)
+target_link_libraries(quark_bench_containers PRIVATE absl::flat_hash_map absl::flat_hash_set
+                      unordered_dense::unordered_dense)
+# system headers, so absl's __int128 doesn't trip -Wpedantic under -Werror
+target_include_directories(quark_bench_containers SYSTEM PRIVATE ${absl_SOURCE_DIR})
