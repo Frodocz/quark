@@ -68,12 +68,27 @@ if (NOT QUARK_USE_FSTACK)
         target_link_libraries(${net_test} PRIVATE OpenSSL::SSL)
     endforeach ()
 else ()
-    # F-Stack: one binary with its own main (F-Stack's loop must own the main thread), run by hand
-    # as root: sudo ./quark_test_fstack --conf <f-stack.conf>. Not registered with ctest.
+    # F-Stack: one binary with its own main (F-Stack's loop must own the main thread). It needs root
+    # and a DPDK-bound port (doc/FSTACK.md), so ctest reports it skipped unless run as root:
+    # sudo ctest -L fstack. By hand: sudo ./quark_test_fstack --conf <f-stack.conf>.
     add_executable(quark_test_fstack net/FStackTest.cpp)
     quark_set_common_compile_options(quark_test_fstack)
     target_link_libraries(quark_test_fstack PRIVATE quark::quark GTest::gtest OpenSSL::SSL)
     target_compile_definitions(quark_test_fstack PRIVATE QUARK_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    set(QUARK_FSTACK_TEST_CONF "${PROJECT_SOURCE_DIR}/doc/f-stack.conf.example" CACHE FILEPATH
+        "F-Stack config for quark_test_fstack under ctest (empty: not registered)")
+    set(QUARK_FSTACK_PEER_IP "" CACHE STRING
+        "Kernel address of this host the DPDK port can reach, enables quark_test_fstack's local tests")
+    if (QUARK_FSTACK_TEST_CONF)
+        add_test(NAME quark_test_fstack COMMAND quark_test_fstack --conf ${QUARK_FSTACK_TEST_CONF})
+        # RUN_SERIAL: DPDK owns the port and the hugepages, one process at a time
+        set_tests_properties(quark_test_fstack PROPERTIES
+                LABELS fstack RUN_SERIAL TRUE SKIP_RETURN_CODE 77 TIMEOUT 300)
+        if (QUARK_FSTACK_PEER_IP)
+            set_tests_properties(quark_test_fstack PROPERTIES
+                    ENVIRONMENT QUARK_FSTACK_PEER_IP=${QUARK_FSTACK_PEER_IP})
+        endif ()
+    endif ()
 endif ()
 
 # utils

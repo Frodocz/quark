@@ -1,5 +1,6 @@
 # Define a variable with all example targets
 set(EXAMPLE_TARGETS
+        quark_example_binance_ws
         quark_example_log
         quark_example_version
 )

@@ -1,0 +1,72 @@
+# F-Stack 2.0 configuration for quark (see doc/FSTACK.md). Only the keys quark cares about are set;
+# the full reference is config.ini in the F-Stack tree. The [port0] values are those of the
+# development instance's DPDK ENI: replace them with your ENI's (EC2 console or
+# `ip -br addr` / `ip route` before binding it to igb_uio).
+
+[dpdk]
+# One lcore: quark runs one F-Stack loop per process (EventLoop::run() calls ff_run() once).
+# Pick an isolated core (isolcpus/nohz_full, doc/TUNING.md); bit 0 is core 0.
+lcore_mask=1
+channel=4
+# ENA can't do promiscuous mode, and the port only needs its own unicast address.
+promiscuous=0
+numa_on=1
+tso=0
+lro=0
+vlan_strip=1
+port_list=0
+nb_vdev=0
+nb_bond=0
+
+# Latency settings, all 0 for a busy-polling quark process (F-Stack's defaults favour throughput):
+# - idle_sleep: microseconds the loop sleeps when no packet arrived.
+# - pkt_tx_delay: microseconds F-Stack holds a partial TX burst (< 32 packets) before sending it.
+# - idle_loop_interval (new in 2.0): minimum microseconds between two loop() callbacks while no
+#   packet arrives. quark's whole step (timers, command queues, sends) runs in that callback, so
+#   the default (100) delays everything not triggered by an incoming packet by up to 100 us.
+idle_sleep=0
+pkt_tx_delay=0
+idle_loop_interval=0
+
+# 2.0 also adds extra_eal_args, appended to rte_eal_init(), e.g. to restrict DPDK to the port:
+#extra_eal_args=--allow=0000:00:06.0
+
+[pcap]
+enable=0
+
+[stack]
+kernel_coexist=0
+
+[port0]
+addr=10.20.88.195
+netmask=255.255.255.128
+broadcast=10.20.88.255
+gateway=10.20.88.129
+if_name=ens6
+
+[freebsd.boot]
+hz=100
+fd_reserve=1024
+kern.ipc.maxsockets=262144
+net.inet.tcp.syncache.hashsize=4096
+net.inet.tcp.syncache.bucketlimit=100
+net.inet.tcp.tcbhashsize=65536
+kern.ncallout=262144
+kern.features.inet6=1
+
+[freebsd.sysctl]
+kern.ipc.somaxconn=32768
+kern.ipc.maxsockbuf=16777216
+net.inet.tcp.sendspace=16384
+net.inet.tcp.recvspace=8192
+net.inet.tcp.cc.algorithm=cubic
+net.inet.tcp.sendbuf_max=16777216
+net.inet.tcp.recvbuf_max=16777216
+net.inet.tcp.sendbuf_auto=1
+net.inet.tcp.recvbuf_auto=1
+net.inet.tcp.sack.enable=1
+net.inet.tcp.delayed_ack=1
+net.inet.tcp.rfc1323=1
+net.inet.ip.redirect=0
+net.inet.ip.forwarding=0
+net.inet.tcp.functions_default=freebsd

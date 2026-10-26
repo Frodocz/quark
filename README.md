@@ -140,8 +140,9 @@ target_link_libraries(my_project PUBLIC quark::quark)
 
 By default `quark::net` uses kernel sockets. Building with `-DQUARK_USE_FSTACK=ON` runs the same API
 over [F-Stack](https://github.com/F-Stack/f-stack) (a userspace TCP/IP stack on DPDK) instead,
-chosen at compile time with no runtime cost. It needs F-Stack and DPDK installed
-(`libfstack.a` under `-DFSTACK_PREFIX=...`, default `/usr/local`; `libdpdk` found by pkg-config).
+chosen at compile time with no runtime cost. It needs F-Stack (2.0) and DPDK installed
+(`libfstack.a` under `-DFSTACK_PREFIX=...`, default `/usr/local`; `libdpdk` found by pkg-config);
+[doc/FSTACK.md](doc/FSTACK.md) covers building both, host setup and configuration.
 
 ```cpp
 #include "quark/net/EventLoop.h"
@@ -159,12 +160,15 @@ int main(int argc, char** argv) {
 F-Stack only processes packets inside its own loop, so under F-Stack `EventLoop::run()` is the
 entry point: calling `step()` from your own loop isn't enough. On AWS, give DPDK a dedicated ENI
 (the instance keeps its primary ENI for SSH, DNS and the kernel) and set that ENI's address,
-netmask and gateway in the `[port0]` section of `f-stack.conf`; ENA doesn't support promiscuous
-mode, so its warning at startup is expected. The F-Stack tests run by hand:
-`sudo ./tests/quark_test_fstack --conf <f-stack.conf>`.
+netmask and gateway in the `[port0]` section of `f-stack.conf`
+([doc/f-stack.conf.example](doc/f-stack.conf.example)). The F-Stack tests need root:
+`sudo ctest -L fstack` (a plain `ctest` reports them skipped), or
+`sudo ./tests/quark_test_fstack --conf <f-stack.conf>`. For a live check,
+[examples/binance_ws.cpp](examples/binance_ws.cpp) streams Binance market data on either backend:
+`sudo ./examples/quark_example_binance_ws --conf <f-stack.conf>`.
 
 For host settings (CPU isolation, IRQs, huge pages, busy polling, real-time priority), see
-[docs/TUNING.md](docs/TUNING.md).
+[doc/TUNING.md](doc/TUNING.md).
 
 ---
 

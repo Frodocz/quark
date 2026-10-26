@@ -2,6 +2,8 @@
 //
 //     sudo ./quark_test_fstack --conf /path/to/f-stack.conf
 //
+// Exits with 77 (skipped, for ctest) when not run as root.
+//
 // F-Stack only processes packets inside its own loop (ff_run), on the thread that initialized it,
 // and can run that loop once per process. So the main thread runs it (EventLoop::run) and steps
 // the event loops the tests register, while the tests run on a second thread and post their
@@ -34,6 +36,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 using namespace quark;
 using namespace quark::net;
@@ -270,6 +274,10 @@ INSTANTIATE_TEST_SUITE_P(Modes, TestFStack, ::testing::Values(true, false),
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);  // leaves only the F-Stack arguments
+    if (::geteuid() != 0) {
+        std::fprintf(stderr, "%s needs root (DPDK owns the port): skipped\n", argv[0]);
+        return 77;  // ctest's SKIP_RETURN_CODE
+    }
     if (!init_fstack(argc, argv)) {
         std::fprintf(stderr, "usage: sudo %s --conf <f-stack.conf> [gtest options]\n", argv[0]);
         return 2;
