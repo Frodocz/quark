@@ -42,11 +42,22 @@ if (NOT QUARK_USE_FSTACK)
     quark_add_benchmark(quark_bench_ws_session net/WsSessionBench.cpp)
     target_include_directories(quark_bench_ws_session PRIVATE ${PROJECT_SOURCE_DIR}/tests/net)
     target_compile_definitions(quark_bench_ws_session PRIVATE QUARK_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests")
-    target_link_libraries(quark_bench_ws_session PRIVATE OpenSSL::SSL)
+    target_link_libraries(quark_bench_ws_session PRIVATE ${QUARK_SSL_LIB})
 endif ()
 
-# hash container comparison: std vs absl (a quark dependency) vs ankerl::unordered_dense (fetched
-# for this benchmark only, header-only)
+# hash container comparison: std vs absl vs ankerl::unordered_dense, both fetched for this
+# benchmark only (quark itself depends on neither) and never installed
+if (NOT TARGET absl::flat_hash_map)
+    FetchContent_Declare(
+        absl
+        GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+        GIT_TAG        20260817.0
+    )
+    set(ABSL_PROPAGATE_CXX_STD ON)
+    set(ABSL_ENABLE_INSTALL OFF)
+    set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(absl)
+endif ()
 FetchContent_Declare(
     unordered_dense
     GIT_REPOSITORY https://github.com/martinus/unordered_dense.git

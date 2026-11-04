@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "QuarkTest.h"
+
 #include <charconv>
 #include <cstdint>
 #include <fstream>
@@ -350,11 +352,7 @@ TEST(JsonParser, ReportsTypeMismatchAndMissingField) {
 
 TEST(JsonParser, RejectsCapacityAboveSimdjsonMax) {
     constexpr size_t too_large = simdjson::SIMDJSON_MAXSIZE_BYTES + 1;
-#if defined(__cpp_exceptions)
-    EXPECT_THROW(JsonParser{too_large}, quark::QuarkError);
-#else
-    EXPECT_DEATH(JsonParser{too_large}, "JsonParser failed to preallocate");
-#endif
+    QUARK_EXPECT_ERROR(JsonParser{too_large}, "JsonParser failed to preallocate");
 }
 
 TEST(JsonParser, TestParseGeneral) {
@@ -416,7 +414,7 @@ TEST(JsonParser, TestParseGeneral) {
     EXPECT_EQ(data["anystr"].get(num_i), simdjson::NO_SUCH_FIELD);
     EXPECT_EQ(num_i, 0);
     EXPECT_EQ(data["match-id"].get(num_i), simdjson::INCORRECT_TYPE);
-    EXPECT_EQ(data["match-id"]->get_int64_in_string().get(num_i), simdjson::SUCCESS);
+    EXPECT_EQ(data["match-id"].get_int64_in_string().get(num_i), simdjson::SUCCESS);
     EXPECT_EQ(num_i, 5014);
 
     EXPECT_EQ(data["id"].get(num_i), simdjson::SUCCESS);
@@ -427,7 +425,7 @@ TEST(JsonParser, TestParseGeneral) {
     EXPECT_EQ(data["anystr"].get(num_d), simdjson::NO_SUCH_FIELD);
     EXPECT_EQ(num_d, 0);
     EXPECT_EQ(data["filled-amount"].get(num_d), simdjson::INCORRECT_TYPE);
-    EXPECT_EQ(data["filled-amount"]->get_double_in_string().get(num_d), simdjson::SUCCESS);
+    EXPECT_EQ(data["filled-amount"].get_double_in_string().get(num_d), simdjson::SUCCESS);
     EXPECT_NEAR(num_d, 147.928994082840236, 1e-10);
 
     EXPECT_EQ(data["fee"].get(num_d), simdjson::SUCCESS);
@@ -435,20 +433,23 @@ TEST(JsonParser, TestParseGeneral) {
 
     // 4. test array
     auto nodes = doc["nodes"];
-    EXPECT_TRUE(!nodes->is_scalar());
-    for (auto node : nodes->get_array()) {
+    // the error-code API throughout: `->` and implicit conversions need simdjson exceptions
+    bool scalar = true;
+    EXPECT_EQ(nodes.is_scalar().get(scalar), simdjson::SUCCESS);
+    EXPECT_FALSE(scalar);
+    for (auto node : nodes.get_array()) {
         std::string_view source;
         EXPECT_EQ(node["source"].get(source), simdjson::SUCCESS);
         EXPECT_EQ(source, "spot-web");
 
         std::string_view price_str;
-        EXPECT_EQ(node["price"]->get(price_str), simdjson::SUCCESS);
+        EXPECT_EQ(node["price"].get(price_str), simdjson::SUCCESS);
         EXPECT_EQ(price_str, "0.338");
         double d;
         EXPECT_EQ(node["price"].get(d), simdjson::INCORRECT_TYPE);
-        EXPECT_EQ(node["price"]->get_double_in_string().get(d), simdjson::SUCCESS);
+        EXPECT_EQ(node["price"].get_double_in_string().get(d), simdjson::SUCCESS);
         // EXPECT_NEAR(d, 0.338, 1e-10);
-        EXPECT_EQ(node["fee"]->get(d), simdjson::SUCCESS);
+        EXPECT_EQ(node["fee"].get(d), simdjson::SUCCESS);
         EXPECT_NEAR(d, 0.06, 1e-10);
     }
 }

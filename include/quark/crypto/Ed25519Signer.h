@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -37,10 +38,16 @@ public:
     Ed25519Signer(Ed25519Signer&&) noexcept;
     Ed25519Signer& operator=(Ed25519Signer&&) noexcept;
 
+    /// The signature, or std::nullopt if the crypto library fails (out of memory): never throws,
+    /// so a failed signature can't take a running process down.
+    [[nodiscard]] std::optional<Signature> try_sign(std::string_view message) noexcept;
+
+    /// try_sign(), throwing QuarkError on failure (a fatal error with QUARK_NO_EXCEPTIONS).
     [[nodiscard]] Signature sign(std::string_view message);
 
-    /// Base64 signature (88 chars) into `out`. Returns the length, or 0 if `out` is too small.
-    std::size_t sign_base64(std::string_view message, std::span<char> out);
+    /// Base64 signature (88 chars) into `out`. Returns the length, or 0 if `out` is too small or
+    /// signing failed. Never throws.
+    std::size_t sign_base64(std::string_view message, std::span<char> out) noexcept;
 
     [[nodiscard]] PublicKey public_key() const;
 

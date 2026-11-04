@@ -88,6 +88,12 @@ Check: `grep -E "HugePages_(Total|Free)" /proc/meminfo`, `ulimit -l`.
 `/sys/devices/system/clocksource/clocksource0/current_clocksource` should be `tsc`, and the CPU
 must report `constant_tsc nonstop_tsc` (`grep -o 'constant_tsc\|nonstop_tsc' /proc/cpuinfo | sort -u`).
 
+`RdtscClock::tscns()` is the TSC scaled to wall time; it follows the system clock (and NTP's
+corrections of it) only while `RdtscClock::calibrate()` runs every few seconds from one thread.
+quark's log backend does that once `init_log()` has run (quill's backend thread, or the thread
+polling `LogPoller`); a process without quark logging calls `calibrate()` itself, about once a
+second from a housekeeping thread. Dates (`Date::utc_today()`) come from the system clock.
+
 ## 7. CPU power states
 
 Deep C-states add microseconds of wake-up latency; frequency scaling adds jitter. Busy polling
@@ -99,7 +105,9 @@ the other cores shallow too; on most virtualized instances the hypervisor decide
 ## 8. Network path
 
 - TLS: quark prefers AES-128-GCM for TLS 1.3 and resumes sessions on reconnect; keep the
-  `TlsContext` per loop.
+  `TlsContext` per loop. Keep the default AWS-LC backend: per `SSL_write` it costs ~0.2 µs and two
+  heap allocations less than OpenSSL 3.5, and handshakes ~2.5x less (PLAN.md, "TLS backend").
+  If OpenSSL is required (`-DQUARK_TLS_BACKEND=OpenSSL`), use 3.5 rather than a distribution's 3.0.
 - Pick the instance's availability zone by measured round-trip time to the venue, and check
   `ethtool -S ens5 | grep allowance_exceeded` (EC2 per-ENI packet and connection limits).
 - For the lowest latency, run the hot connections on F-Stack (`QUARK_USE_FSTACK=ON`, see the

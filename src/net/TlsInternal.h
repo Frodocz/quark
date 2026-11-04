@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TlsBackend.h"
+
 #include <openssl/ssl.h>
 
 #include <string>

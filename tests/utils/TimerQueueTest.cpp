@@ -27,13 +27,20 @@ static void* counted_malloc(std::size_t n) noexcept {
     g_heap_allocs.fetch_add(1, std::memory_order_relaxed);
     return std::malloc(n == 0 ? 1 : n);
 }
+[[noreturn]] static void out_of_memory() {
+#if defined(__cpp_exceptions)
+    throw std::bad_alloc();
+#else
+    std::abort();  // what operator new does in a build without exceptions
+#endif
+}
 void* operator new(std::size_t n) {
     if (void* p = counted_malloc(n)) return p;
-    throw std::bad_alloc();
+    out_of_memory();
 }
 void* operator new[](std::size_t n) {
     if (void* p = counted_malloc(n)) return p;
-    throw std::bad_alloc();
+    out_of_memory();
 }
 void* operator new(std::size_t n, const std::nothrow_t&) noexcept { return counted_malloc(n); }
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return counted_malloc(n); }

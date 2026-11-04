@@ -3,10 +3,13 @@
 #include "quark/QuarkError.h"
 #include "gtest/gtest.h"
 
+#include "QuarkTest.h"
+
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 
 #include <fcntl.h>
+#include <csignal>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -104,7 +107,7 @@ TEST_F(TestHmacSha256, MoveAndEmptyKey) {
     HmacSha256 b(std::move(a));
     EXPECT_EQ(to_hex(b.sign("what do ya want for nothing?")),
               "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
-    EXPECT_THROW(HmacSha256(""), QuarkError);
+    QUARK_EXPECT_ERROR(HmacSha256(""), "HmacSha256: empty key");
 }
 
 class TestEd25519Signer : public ::testing::Test {};
@@ -129,6 +132,22 @@ TEST_F(TestEd25519Signer, Rfc8032) {
 }
 
 // The RFC 8032 TEST 1 key wrapped as PKCS#8 PEM (as Binance's key generator produces)
+TEST_F(TestEd25519Signer, TrySignMatchesSignAndNeverThrows) {
+    auto key = from_hex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb");
+    auto signer = Ed25519Signer::from_private_key(std::span<const uint8_t, 32>(key.data(), 32));
+    static_assert(noexcept(signer.try_sign(std::string_view{})));
+    static_assert(noexcept(signer.sign_base64(std::string_view{}, std::span<char>{})));
+    const auto sig = signer.try_sign("\x72");
+    ASSERT_TRUE(sig.has_value());
+    EXPECT_EQ(*sig, signer.sign("\x72"));
+    EXPECT_EQ(to_hex(*sig),
+              "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c"
+              "387b2eaeb4302aeeb00d291612bb0c00");
+    char b64[88];
+    EXPECT_EQ(signer.sign_base64("\x72", b64), 88u);
+    EXPECT_EQ(signer.sign_base64("\x72", std::span<char>{b64, 87}), 0u);  // too small: 0, no throw
+}
+
 TEST_F(TestEd25519Signer, FromPem) {
     constexpr std::string_view kPem =
         "-----BEGIN PRIVATE KEY-----\n"
@@ -144,7 +163,7 @@ TEST_F(TestEd25519Signer, FromPem) {
 }
 
 TEST_F(TestEd25519Signer, RejectsBadKeys) {
-    EXPECT_THROW(Ed25519Signer::from_pem("not a pem"), QuarkError);
+    QUARK_EXPECT_ERROR(Ed25519Signer::from_pem("not a pem"), "cannot parse PEM private key");
     // a valid PEM private key of another type (EC P-256)
     constexpr std::string_view kEcPem =
         "-----BEGIN PRIVATE KEY-----\n"
@@ -152,18 +171,35 @@ TEST_F(TestEd25519Signer, RejectsBadKeys) {
         "C1gVVvHJG2O9ipblAf6huMl4v0ihRANCAAToZheuDBvokx22wUQryJ2T6vhxtsOO\n"
         "2A4kwICfP/WkgoVk5nBIJF1WjcxPk0TjIf3KWZWXKPBXLN4ryP5dWZBc\n"
         "-----END PRIVATE KEY-----\n";
-    try {
-        (void)Ed25519Signer::from_pem(kEcPem);
-        FAIL() << "expected QuarkError";
-    } catch (const QuarkError& e) {
-        EXPECT_NE(std::string_view(e.what()).find("not an Ed25519 key"), std::string_view::npos) << e.what();
-    }
+    QUARK_EXPECT_ERROR((void)Ed25519Signer::from_pem(kEcPem), "PEM key is not an Ed25519 key");
 }
 
 // An encrypted key must fail at once: OpenSSL's default passphrase callback would prompt on the
 // controlling terminal and block. The child gets a pseudo-terminal as its controlling tty, so a
 // prompt really would block there; a watchdog thread turns that into a failure (not SIGALRM:
 // OpenSSL's prompt catches it and keeps waiting).
+// exits 0 on the expected QuarkError; with QUARK_NO_EXCEPTIONS the failure is a fatal error (SIGABRT)
+[[noreturn]] void parse_encrypted_pem_and_exit(std::string_view pem) {
+#if defined(QUARK_NO_EXCEPTIONS)
+    (void)Ed25519Signer::from_pem(pem);
+#else
+    try {
+        (void)Ed25519Signer::from_pem(pem);
+    } catch (const QuarkError&) {
+        std::_Exit(0);
+    }
+#endif
+    std::_Exit(1);
+}
+
+#if defined(QUARK_NO_EXCEPTIONS)
+const auto kEncryptedPemOutcome = ::testing::KilledBySignal(SIGABRT);
+constexpr const char* kEncryptedPemMessage = "cannot parse PEM private key";
+#else
+const auto kEncryptedPemOutcome = ::testing::ExitedWithCode(0);
+constexpr const char* kEncryptedPemMessage = "";
+#endif
+
 TEST_F(TestEd25519Signer, EncryptedPemFailsWithoutPrompting) {
     constexpr std::string_view kEncryptedPem =
         "-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
@@ -183,14 +219,9 @@ TEST_F(TestEd25519Signer, EncryptedPemFailsWithoutPrompting) {
                 std::this_thread::sleep_for(std::chrono::seconds(5));
                 std::_Exit(2);  // blocked in a prompt
             }).detach();
-            try {
-                (void)Ed25519Signer::from_pem(kEncryptedPem);
-            } catch (const QuarkError&) {
-                std::_Exit(0);
-            }
-            std::_Exit(1);
+            parse_encrypted_pem_and_exit(kEncryptedPem);
         },
-        ::testing::ExitedWithCode(0), "");
+        kEncryptedPemOutcome, kEncryptedPemMessage);
 }
 
 // keys at the SHA-256 block size boundary (64 bytes is used as is, 65 is hashed first)

@@ -10,12 +10,15 @@ port = 8080
 #   cpu_affinity             cores of quill's backend thread (default [], unpinned)
 #   backend_sleep_ns         idle sleep of quill's backend thread (default 100000, 0 busy-polls)
 #   backend_yield_when_idle  only with backend_sleep_ns = 0: yield instead of spinning
+#   crash_handler            log uncaught exceptions and crash signals before dying (default true)
+#   fatal_flush_timeout_ms   how long a fatal error waits for the log flush (default 2000)
 # The queue type, capacity and huge pages are build options: -DQUARK_LOG_QUEUE_TYPE=...,
 # -DQUARK_LOG_INITIAL_QUEUE_CAPACITY=<bytes>, -DQUARK_LOG_HUGE_PAGES=ON|OFF.
 #
 # One sub-table per logger, the table name is the logger name: quark::get_logger("app").
-#   level, to_console, to_rotating_file, pattern, filename (default logs/<name>.log),
-#   max_file_size_bytes, max_backup_files, daily_rotation_time
+#   level, to_console, to_rotating_file, pattern, filename (default logs/<name>.log; the process
+#   start time is appended: logs/<name>_YYYYMMDD_HHMMSS.log, GMT), max_file_size_bytes,
+#   max_backup_files (per run: files of earlier runs are not removed), daily_rotation_time
 # Loggers without a table get the defaults. [quark] configures quark's own logger.
 
 # HFT: the process polls the backend on its own housekeeping thread.

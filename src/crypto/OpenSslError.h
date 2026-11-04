@@ -14,9 +14,6 @@ namespace quark::crypto::detail {
     if (const unsigned long e = ::ERR_get_error(); e != 0) ::ERR_error_string_n(e, reason, sizeof(reason));
     ::ERR_clear_error();
     QUARK_THROW(QuarkError{std::string(what) + ": " + reason});
-#if defined(QUARK_NO_EXCEPTIONS)
-    std::abort();  // unreachable: QUARK_THROW aborts
-#endif
 }
 
 } // namespace quark::crypto::detail

@@ -1,13 +1,17 @@
 #include "quark/net/WsHandshake.h"
 
-#include "quark/QuarkError.h"
+#include "quark/QuarkLog.h"
 #include "quark/crypto/Base64Encoding.h"
+#include "quark/utils/RdtscClock.h"
 
 #include <openssl/evp.h>
 #include <sys/random.h>
 
+#include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <string>
 
 QUARK_BEGIN_NAMESPACE
 
@@ -17,13 +21,46 @@ namespace {
 
 constexpr std::string_view kWsGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-void fill_random(void* buf, std::size_t len) {
+// splitmix64 over the TSC, an address and a counter: not cryptographic, only the fallback below
+void fill_fallback(uint8_t* p, std::size_t len) noexcept {
+    static std::atomic<uint64_t> counter{0};
+    uint64_t x = static_cast<uint64_t>(RdtscClock::rdtsc()) ^ reinterpret_cast<uintptr_t>(p) ^
+                 (counter.fetch_add(1, std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull);
+    while (len > 0) {
+        x += 0x9E3779B97F4A7C15ull;
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z ^= z >> 31;
+        const std::size_t n = len < sizeof(z) ? len : sizeof(z);
+        std::memcpy(p, &z, n);
+        p += n;
+        len -= n;
+    }
+}
+
+// getrandom() (blocking mode, EINTR retried) doesn't fail on Linux >= 3.17 once booted. Should it
+// anyway (a seccomp filter, ENOSYS), fall back instead of failing every reconnect: RFC 6455 only
+// needs the handshake nonce and masking keys to be unpredictable to intermediaries.
+void fill_random(void* buf, std::size_t len) noexcept {
     auto* p = static_cast<uint8_t*>(buf);
     while (len > 0) {
         const ssize_t n = ::getrandom(p, len, 0);
         if (n < 0) {
             if (errno == EINTR) continue;
-            QUARK_THROW(QuarkError{"getrandom failed"});
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                const int err = errno;
+                // only an existing logger: creating one could fail, and this must not throw
+                if (Logger* logger = Frontend::get_logger(std::string{kQuarkLoggerName})) {
+                    QUILL_LOG_WARNING(logger, "getrandom failed (errno {}), WebSocket keys fall back to a "
+                                              "TSC-seeded generator", err);
+                } else {
+                    std::fprintf(stderr, "quark: getrandom failed (errno %d), WebSocket keys fall back to a "
+                                         "TSC-seeded generator\n", err);
+                }
+            }
+            fill_fallback(p, len);
             return;
         }
         p += n;
@@ -49,7 +86,7 @@ std::string_view trim(std::string_view v) noexcept {
 
 } // namespace
 
-uint64_t os_random_u64() {
+uint64_t os_random_u64() noexcept {
     uint64_t v = 0;
     fill_random(&v, sizeof(v));
     return v;
@@ -72,7 +109,7 @@ void compute_ws_accept(std::string_view key, std::span<char, 28> out) {
     (void)base64_encode({digest, 20}, out);  // 20 bytes -> exactly 28 chars
 }
 
-WsHandshakeKey make_ws_handshake_key() {
+WsHandshakeKey make_ws_handshake_key() noexcept {
     uint8_t nonce[16];
     fill_random(nonce, sizeof(nonce));
     WsHandshakeKey k{};

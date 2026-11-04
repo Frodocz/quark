@@ -68,6 +68,17 @@ struct QUARK_API LogBackendOptions {
     std::chrono::nanoseconds sleep_duration{std::chrono::microseconds{100}};
     // Only with sleep_duration == 0: yield the core when idle instead of spinning.
     bool yield_when_idle{false};
+    // Keep the reason of a crash in the log file: install a std::terminate handler that logs an
+    // uncaught exception's message through quark::fatal_error() (QuarkError.h), and, with quill's
+    // backend thread, quill's handler for SIGABRT, SIGBUS, SIGFPE, SIGILL and SIGSEGV, which logs
+    // the signal and flushes before the process dies (through "quark.crash", a copy of quark's
+    // logger at Info, so the line shows even with [log.quark] at Warn). SIGINT and SIGTERM are
+    // left to the application. With manual_backend no signal handler is installed: nothing could drive the
+    // backend from a signal. `crash_handler` in [log].
+    bool crash_handler{true};
+    // How long a fatal error or crash waits for the log queues to be flushed before the process
+    // aborts anyway (a stuck or stopped backend must not hang it). `fatal_flush_timeout_ms` in [log].
+    std::chrono::milliseconds fatal_flush_timeout{2000};
 };
 
 // Options of one logger, read from its [log.<name>] table. Missing keys keep these defaults.
@@ -84,11 +95,14 @@ struct QUARK_API LogOptions {
     // quill pattern of a log line, empty uses quark's default.
     std::string pattern{};
 
-    // Empty means "logs/<logger name>.log". Loggers sharing a filename share the file sink.
+    // Empty means "logs/<logger name>.log". The process start time (GMT) is appended to the file
+    // name, so each run writes its own file: logs/net.log -> logs/net_20261104_093000.log.
+    // Loggers sharing a filename share the file sink.
     std::string filename{};
     // 0 disables size-based rotation.
     std::int64_t max_file_size_bytes{128 * 1024 * 1024};
-    // 0 keeps every rotated file.
+    // Rotated files kept per run, 0 keeps every one. Files of earlier runs (other start times)
+    // are never removed by quark: clean them up externally.
     std::int64_t max_backup_files{10};
     // HH:MM (GMT) of the daily rotation, empty disables it.
     std::string daily_rotation_time{"00:00"};
@@ -129,6 +143,9 @@ QUARK_API void shutdown_log() noexcept;
 //   while (running) {
 //       poller.poll_for(std::chrono::microseconds{50});
 //   }
+//
+// Polling also keeps RdtscClock calibrated against the system clock (RdtscClock::calibrate(),
+// one rdtsc() unless a calibration is due): make no other thread call RdtscClock::calibrate().
 class QUARK_API LogPoller {
 public:
     LogPoller();   // At most one per process.

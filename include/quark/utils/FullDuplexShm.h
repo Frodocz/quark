@@ -65,18 +65,14 @@ private:
     }
 
     static void set_permission(std::string_view file) {
-        QUARK_TRY {
-            namespace fs = std::filesystem;
-            fs::permissions(
-                file,
-                fs::perms::owner_read | fs::perms::owner_write |
-                    fs::perms::group_read | fs::perms::group_write |
-                    fs::perms::others_read | fs::perms::others_write,
-                fs::perm_options::replace
-            );
-        } QUARK_CATCH(const std::filesystem::filesystem_error& e) {
-            auto err = fmtlib::format("failed to set 0666 to file: {}, error: {}", file, e.what());
-            QUARK_THROW(QuarkError{std::move(err)});
+        namespace fs = std::filesystem;
+        std::error_code ec;  // error_code overloads: no exception, also without QUARK_NO_EXCEPTIONS
+        fs::permissions(file,
+                        fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read |
+                            fs::perms::group_write | fs::perms::others_read | fs::perms::others_write,
+                        fs::perm_options::replace, ec);
+        if (ec) {
+            QUARK_THROW(QuarkError{fmtlib::format("failed to set 0666 to file: {}, error: {}", file, ec.message())});
         }
     }
 
@@ -99,27 +95,35 @@ private:
     }
 
     static void create_dir(std::string_view filename) {
-        if (!filename.empty()) {
-            auto path = std::filesystem::path(filename);
-            auto parent_path = path.parent_path();
-            if (!parent_path.empty()) {
-                std::filesystem::create_directories(parent_path);
+        namespace fs = std::filesystem;
+        if (filename.empty()) {
+            QUARK_THROW(QuarkError{"Empty shm path"});
+        }
+        std::error_code ec;
+        auto path = fs::path(filename);
+        if (const auto parent_path = path.parent_path(); !parent_path.empty()) {
+            fs::create_directories(parent_path, ec);
+            if (ec) {
+                QUARK_THROW(QuarkError{fmtlib::format("cannot create {}: {}", parent_path.string(), ec.message())});
             }
-            while (path.has_parent_path()) {
-                path = path.parent_path();
-                if (path.parent_path() == path) {
-                    break;
-                }
-                std::filesystem::perms p = std::filesystem::status(path).permissions();
-                std::filesystem::perms new_p = p | std::filesystem::perms::others_exec |
-                                            std::filesystem::perms::group_exec |
-                                            std::filesystem::perms::owner_exec;
-                if (p != new_p) {
-                    std::filesystem::permissions(path, new_p);
+        }
+        // every ancestor directory must be traversable by the peer process
+        while (path.has_parent_path()) {
+            path = path.parent_path();
+            if (path.parent_path() == path) {
+                break;
+            }
+            const fs::perms p = fs::status(path, ec).permissions();
+            if (ec) {
+                QUARK_THROW(QuarkError{fmtlib::format("cannot stat {}: {}", path.string(), ec.message())});
+            }
+            const fs::perms new_p = p | fs::perms::others_exec | fs::perms::group_exec | fs::perms::owner_exec;
+            if (p != new_p) {
+                fs::permissions(path, new_p, ec);
+                if (ec) {
+                    QUARK_THROW(QuarkError{fmtlib::format("cannot chmod {}: {}", path.string(), ec.message())});
                 }
             }
-        } else {
-            QUARK_THROW(QuarkError{fmtlib::format("Empty shm path: {}", filename)});
         }
     }
 

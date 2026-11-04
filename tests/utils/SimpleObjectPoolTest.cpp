@@ -149,11 +149,13 @@ struct Tracked {
     ~Tracked() { ++dtor; }
 };
 
+#if defined(__cpp_exceptions)  // not with QUARK_NO_EXCEPTIONS (-fno-exceptions)
 struct Throwing {
     explicit Throwing(bool fail) {
         if (fail) throw std::runtime_error("ctor failed");
     }
 };
+#endif
 }  // namespace
 
 TEST_F(TestSimpleObjectPool, ExactlyOneCtorDtorPerObject) {
@@ -181,6 +183,7 @@ TEST_F(TestSimpleObjectPool, ConstructorArguments) {
     pool.free(t);
 }
 
+#if defined(__cpp_exceptions)
 TEST_F(TestSimpleObjectPool, ThrowingConstructorReturnsSlot) {
     SimpleObjectPool<Throwing> pool(1, 1);
     EXPECT_THROW((void)pool.alloc(true), std::runtime_error);
@@ -190,6 +193,7 @@ TEST_F(TestSimpleObjectPool, ThrowingConstructorReturnsSlot) {
     EXPECT_EQ(pool.get_capacity(), 1u);  // reused the slot, no growth
     pool.free(ok);
 }
+#endif
 
 TEST_F(TestSimpleObjectPool, FreeNullIsNoop) {
     SimpleObjectPool<Order> pool(1, 1);

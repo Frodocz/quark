@@ -121,7 +121,7 @@ TEST_F(TestScaleInt, TestE13) {
     RdtscClock::calibrate();
 
     // test performance
-    const auto start = RdtscClock::rdtsc();
+    [[maybe_unused]] const auto start = RdtscClock::rdtsc();  // unused with QUARK_ENABLE_LOGGER=OFF
     char buf[64];
     for (int i = 0; i < 10; i++) {
         for (const auto& t : test_cases) {
@@ -129,7 +129,7 @@ TEST_F(TestScaleInt, TestE13) {
         }
     }
 
-    const auto end = RdtscClock::rdtsc();
+    [[maybe_unused]] const auto end = RdtscClock::rdtsc();
     QUARK_LOG_INFO("latency per num:{}", (end - start) / (test_cases.size() * 10));
 }
 
@@ -367,7 +367,7 @@ TEST_F(TestScaleInt, TestFormattingE9) {
     RdtscClock::calibrate();
 
     // test performance
-    const auto start = RdtscClock::rdtsc();
+    [[maybe_unused]] const auto start = RdtscClock::rdtsc();  // unused with QUARK_ENABLE_LOGGER=OFF
     char buf[64];
     for (int i = 0; i < 10; i++) {
         for (const auto& t : testCases) {
@@ -375,7 +375,7 @@ TEST_F(TestScaleInt, TestFormattingE9) {
         }
     }
 
-    const auto end = RdtscClock::rdtsc();
+    [[maybe_unused]] const auto end = RdtscClock::rdtsc();
     QUARK_LOG_INFO("latency per num:{}", (end - start) / (testCases.size() * 10));
 }
 

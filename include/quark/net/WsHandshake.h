@@ -22,14 +22,15 @@ struct WsHandshakeKey {
     [[nodiscard]] std::string_view accept_view() const noexcept { return {accept, sizeof(accept)}; }
 };
 
-/// A fresh key from the OS random source, with its expected accept value.
-QUARK_API WsHandshakeKey make_ws_handshake_key();
+/// A fresh key from the OS random source, with its expected accept value. Never fails: should
+/// getrandom() fail, a TSC-seeded generator is used (logged once).
+QUARK_API WsHandshakeKey make_ws_handshake_key() noexcept;
 
 /// base64(SHA-1(key + RFC 6455 GUID)) of a base64 `key`, into `out`.
 QUARK_API void compute_ws_accept(std::string_view key, std::span<char, 28> out);
 
-/// 64 random bits from the OS (getrandom), e.g. to seed per-session generators.
-QUARK_API uint64_t os_random_u64();
+/// 64 random bits from the OS (getrandom), e.g. to seed per-session generators; same fallback.
+QUARK_API uint64_t os_random_u64() noexcept;
 
 /// Appends the HTTP/1.1 upgrade request to `out`. `host` is the Host header value (with
 /// ":port" when not the scheme's default), `extra_headers` complete "Name: value\r\n" lines.

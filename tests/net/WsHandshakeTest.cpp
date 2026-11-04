@@ -1,6 +1,19 @@
 #include "quark/net/WsHandshake.h"
 #include "gtest/gtest.h"
 
+#include "QuarkTest.h"
+
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
+#include <sys/random.h>
+#include <sys/syscall.h>
+
+#include <cerrno>
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 using namespace quark::net;
@@ -26,6 +39,38 @@ TEST_F(TestWsHandshake, FreshKeysAreRandomAndConsistent) {
     compute_ws_accept(a.key_view(), expected);
     EXPECT_EQ(a.accept_view(), std::string_view(expected, 28));
     EXPECT_EQ(a.key_view().back(), '=');  // base64 of 16 bytes
+}
+
+// Child of the test below: a seccomp filter makes getrandom() fail with ENOSYS. Keys must still be
+// produced (the fallback), differ, and carry the right accept value.
+[[noreturn]] void make_keys_without_getrandom() {
+    sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getrandom, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    sock_fprog prog{static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])), filter};
+    if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 || ::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        std::_Exit(3);
+    }
+    char probe[4];
+    if (::getrandom(probe, sizeof(probe), 0) != -1 || errno != ENOSYS) std::_Exit(4);  // the filter is active
+    const WsHandshakeKey a = make_ws_handshake_key();
+    const WsHandshakeKey b = make_ws_handshake_key();
+    if (a.key_view() == b.key_view()) std::_Exit(5);
+    char accept[28];
+    compute_ws_accept(a.key_view(), accept);
+    if (std::string_view(accept, 28) != a.accept_view()) std::_Exit(6);
+    if (os_random_u64() == os_random_u64()) std::_Exit(7);
+    std::_Exit(0);
+}
+
+// a warning goes to stderr (no logger exists in this binary)
+TEST_F(TestWsHandshake, KeysSurviveAFailingGetrandom) {
+    static_assert(noexcept(make_ws_handshake_key()));
+    static_assert(noexcept(os_random_u64()));
+    EXPECT_EXIT(make_keys_without_getrandom(), ::testing::ExitedWithCode(0), "getrandom failed \\(errno 38\\)");
 }
 
 TEST_F(TestWsHandshake, UpgradeRequest) {

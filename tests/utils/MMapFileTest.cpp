@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include "QuarkTest.h"
+
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -63,11 +65,11 @@ TEST(MMapFileTest, FailuresLeakNothingAndCanBeRetried) {
     MMapFile f;
     for (int i = 0; i < 5; ++i) {
         // an empty file mapped with size 0: open succeeds, mmap fails
-        EXPECT_THROW(f.initialize({.filename = path, .lock = false, .size = 0}), QuarkError);
+        QUARK_EXPECT_ERROR(f.initialize({.filename = path, .lock = false, .size = 0}), "mmap failed");
         EXPECT_EQ(f.addr(), nullptr);
         EXPECT_EQ(f.fd(), -1);
     }
-    EXPECT_THROW(f.initialize({.filename = "/nonexistent-dir/x", .lock = false, .size = 64}), QuarkError);
+    QUARK_EXPECT_ERROR(f.initialize({.filename = "/nonexistent-dir/x", .lock = false, .size = 64}), "mmap failed");
     EXPECT_EQ(open_fd_count(), fds_before);
     f.initialize({.filename = path, .lock = false, .size = 64});  // the object is still usable
     EXPECT_NE(f.addr(), nullptr);
@@ -110,7 +112,7 @@ TEST(FullDuplexShmTest, RoundTripAndOversizeWrites) {
         EXPECT_FALSE(b.try_read([](Shm::MsgHeader*) {}));
 
         // a second writer on the same queue is refused (flock)
-        EXPECT_THROW(Shm(b_to_a, a_to_b, true), QuarkError);
+        QUARK_EXPECT_ERROR(Shm(b_to_a, a_to_b, true), "flock failed");
     }
     std::filesystem::remove(a_to_b);
     std::filesystem::remove(b_to_a);

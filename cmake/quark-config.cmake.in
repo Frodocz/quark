@@ -1,8 +1,11 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(absl CONFIG)
-find_dependency(OpenSSL 3.0)
+if ("@QUARK_TLS_BACKEND@" STREQUAL "OpenSSL")
+    find_dependency(OpenSSL 3.0)
+else ()
+    find_dependency(ssl CONFIG)  # AWS-LC: AWS::ssl, AWS::crypto
+endif ()
 find_dependency(simdjson CONFIG)
 find_dependency(quill @QUARK_QUILL_VERSION@ EXACT CONFIG)
 find_package(Threads REQUIRED)

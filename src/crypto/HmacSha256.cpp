@@ -1,21 +1,16 @@
-// The precomputed-state construction needs the low-level SHA256_* API, deprecated (not removed)
-// in OpenSSL 3. It is ~2x faster than duplicating an EVP_MAC context per message and doesn't
-// allocate. If a future OpenSSL drops it, the EVP_MAC_CTX_dup fallback below is used. Must come
-// before any OpenSSL header.
+// The precomputed-state construction needs the low-level SHA256_* API: regular API in AWS-LC,
+// deprecated (not removed) in OpenSSL 3. It is ~2x faster than duplicating an EVP_MAC context per
+// message and doesn't allocate. If a future OpenSSL drops it, the EVP_MAC_CTX_dup fallback below
+// is used. Must come before any OpenSSL header.
 #define OPENSSL_SUPPRESS_DEPRECATED
 
 #include "quark/crypto/HmacSha256.h"
 #include "quark/crypto/Base64Encoding.h"
 
 #include "OpenSslError.h"
+#include "TlsBackend.h"
 
-#include <openssl/opensslv.h>
-
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
-    #error "quark::crypto requires OpenSSL 3.0 or newer"
-#endif
-
-#if OPENSSL_VERSION_MAJOR == 3
+#if defined(OPENSSL_IS_AWSLC) || OPENSSL_VERSION_MAJOR == 3
     #define QUARK_HMAC_PRECOMPUTED_SHA256 1
     #include <openssl/sha.h>
 #else

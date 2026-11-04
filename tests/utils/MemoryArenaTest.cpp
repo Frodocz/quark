@@ -1,6 +1,8 @@
 #include "quark/utils/MemoryArena.h"
 #include "gtest/gtest.h"
 
+#include "QuarkTest.h"
+
 #include <unistd.h>
 
 #include <cstdint>
@@ -53,7 +55,7 @@ TEST_F(TestMemoryArena, AlignmentPaddingCanExhaust) {
 }
 
 TEST_F(TestMemoryArena, ZeroCapacityThrows) {
-    EXPECT_THROW(MemoryArena(0), QuarkError);
+    QUARK_EXPECT_ERROR(MemoryArena(0), "MemoryArena: zero capacity");
 }
 
 TEST_F(TestMemoryArena, HugePagePolicy) {

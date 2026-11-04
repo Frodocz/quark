@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quark/Attributes.h"
+#include "quark/QuarkError.h"
 
 #include <algorithm>
 #include <cassert>
@@ -194,7 +195,7 @@ class CircularBuffer {
     // storage aligned for T (malloc only guarantees alignof(max_align_t))
     static T* allocate(size_t n) {
         if (n > std::numeric_limits<size_t>::max() / sizeof(T)) {
-            throw std::bad_array_new_length();
+            QUARK_THROW(std::bad_array_new_length());  // a fatal error with QUARK_NO_EXCEPTIONS
         }
         return static_cast<T*>(::operator new(n * sizeof(T), std::align_val_t{alignof(T)}));
     }

@@ -4,7 +4,7 @@
   #define QUARK_BEGIN_NAMESPACE                                                                    \
     namespace quark                                                                                \
     {                                                                                              \
-    inline namespace v0                                                                            \
+    inline namespace v1 /* the major version: 0.x and 1.x objects must not link together */      \
     {
   #define QUARK_END_NAMESPACE                                                                      \
     }                                                                                              \
@@ -18,8 +18,8 @@
  */
 #define QUARK_API __attribute__((visibility("default")))
 
-constexpr inline int QUARK_VERSION_MAJOR{0};
-constexpr inline int QUARK_VERSION_MINOR{1};
+constexpr inline int QUARK_VERSION_MAJOR{1};
+constexpr inline int QUARK_VERSION_MINOR{0};
 constexpr inline int QUARK_VERSION_PATCH{0};
 inline constexpr int Version{QUARK_VERSION_MAJOR * 10000 + QUARK_VERSION_MINOR * 100 + QUARK_VERSION_PATCH};
 

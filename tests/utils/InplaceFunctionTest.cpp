@@ -1,6 +1,8 @@
 #include "quark/utils/InplaceFunction.h"
 #include "gtest/gtest.h"
 
+#include "QuarkTest.h"
+
 #include <array>
 #include <functional>
 #include <memory>
@@ -34,6 +36,8 @@ TEST_F(TestInplaceFunction, EmptyAndReset) {
     EXPECT_FALSE(f);
 #if !defined(QUARK_NO_EXCEPTIONS)
     EXPECT_THROW(f(), std::bad_function_call);
+#else
+    EXPECT_DEATH(f(), "bad_function_call");
 #endif
 }
 

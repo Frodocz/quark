@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12...4.2)
+cmake_minimum_required(VERSION 3.16...4.2)  # 3.16: GoogleTest's minimum (tests build by default)
 
 project(quark)
 
@@ -27,6 +27,15 @@ option(QUARK_SANITIZE_THREAD "Enable ThreadSanitizer (TSan) for detecting thread
 option(QUARK_USE_FSTACK "Run quark::net over F-Stack (DPDK userspace TCP/IP) instead of kernel sockets." OFF)
 option(QUARK_USE_VALGRIND "Use Valgrind as the default memory checking tool in CTest. Valgrind must be installed." OFF)
 
+# TLS and crypto backend of quark::crypto and quark::net. AWS-LC (default) avoids the lock and allocation
+# overhead OpenSSL 3 added to its hot paths; it is found installed (CMAKE_PREFIX_PATH / AWSLC_ROOT) or fetched.
+set(QUARK_TLS_BACKEND AWS-LC CACHE STRING "TLS/crypto library used by quark: AWS-LC or OpenSSL (>= 3.0)")
+set_property(CACHE QUARK_TLS_BACKEND PROPERTY STRINGS AWS-LC OpenSSL)
+if (NOT QUARK_TLS_BACKEND MATCHES "^(AWS-LC|OpenSSL)$")
+    message(FATAL_ERROR "Invalid QUARK_TLS_BACKEND: ${QUARK_TLS_BACKEND} (expected AWS-LC or OpenSSL)")
+endif ()
+set(QUARK_AWSLC_VERSION 5.12.0)
+
 # Internal option
 set(QUARK_ENABLE_GCC_HARDENING OFF CACHE INTERNAL "")
 set(QUARK_LOG_INITIAL_QUEUE_CAPACITY 2097152 CACHE STRING "Capacity in bytes of each logging thread's queue, default 2MB (quill only accepts it at compile time).")
@@ -36,7 +45,7 @@ if (NOT QUARK_LOG_QUEUE_TYPE MATCHES "^(UnboundedBlocking|UnboundedDropping|Boun
     message(FATAL_ERROR "Invalid QUARK_LOG_QUEUE_TYPE: ${QUARK_LOG_QUEUE_TYPE}")
 endif ()
 # Every module of a process must use the same quill, also checked by a static_assert in QuarkLog.cpp
-set(QUARK_QUILL_VERSION 13.0.0)
+set(QUARK_QUILL_VERSION 13.1.0)
 
 #-------------------------------------------------------------------------------------------------------
 # Determine if quark is built as a subproject (using add_subdirectory) or if it is the master project.
@@ -81,7 +90,6 @@ endif ()
 # Required Packages
 #-------------------------------------------------------------------------------------------------------
 find_package(Threads REQUIRED)
-find_package(OpenSSL 3.0 REQUIRED)
 
 if (QUARK_BUILD_TESTS)
     enable_testing()
@@ -106,12 +114,6 @@ endif ()
 #-------------------------------------------------------------------------------------------------------
 include(FetchContent)
 FetchContent_Declare(
-    absl
-    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG        20260817.0
-)
-
-FetchContent_Declare(
     simdjson
     GIT_REPOSITORY https://github.com/simdjson/simdjson.git
     GIT_TAG        v5.0.3
@@ -126,11 +128,7 @@ FetchContent_Declare(
 # whether to use std::format or use external fmtlib
 set(QUARK_USE_STD_FORMAT OFF)
 
- # must be set before FetchContent_MakeAvailable / add_subdirectory
-set(ABSL_PROPAGATE_CXX_STD ON)
-set(ABSL_ENABLE_INSTALL ON)
-# disable building Abseil's internal tests to speed up compile time
-set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+# must be set before FetchContent_MakeAvailable / add_subdirectory
 # quark exposes simdjson in its public headers (JsonParser.h), so simdjson must export its own targets
 set(SIMDJSON_INSTALL ON CACHE BOOL "" FORCE)
 # quill is exposed through QuarkLog.h, so it installs its own headers, config and targets alongside quark
@@ -154,7 +152,69 @@ else()
     message(STATUS "Configuring with quill bundled fmtlib (Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
 endif ()
 
-FetchContent_MakeAvailable(absl simdjson tomlplusplus)
+FetchContent_MakeAvailable(simdjson tomlplusplus)
+
+#-------------------------------------------------------------------------------------------------------
+# TLS backend: QUARK_SSL_LIB and QUARK_CRYPTO_LIB name the libssl / libcrypto targets used everywhere below
+#-------------------------------------------------------------------------------------------------------
+if (QUARK_TLS_BACKEND STREQUAL "OpenSSL")
+    find_package(OpenSSL 3.0 REQUIRED)
+    set(QUARK_SSL_LIB OpenSSL::SSL)
+    set(QUARK_CRYPTO_LIB OpenSSL::Crypto)
+else ()
+    # AWS-LC installs CMake packages named "ssl" and "crypto" (targets AWS::ssl, AWS::crypto); OpenSSL doesn't,
+    # so these can't pick up the system OpenSSL by mistake. Reuse a parent project's AWS-LC or an installed one.
+    if (NOT TARGET AWS::ssl AND NOT TARGET ssl)
+        if (AWSLC_ROOT)
+            list(PREPEND CMAKE_PREFIX_PATH ${AWSLC_ROOT})
+        endif ()
+        find_package(ssl CONFIG QUIET)
+    endif ()
+    if (TARGET AWS::ssl)
+        message(STATUS "Using AWS-LC found at ${ssl_DIR}")
+    elseif (TARGET ssl AND TARGET crypto)
+        message(STATUS "Using the AWS-LC targets of the parent project")
+    else ()
+        message(STATUS "AWS-LC not found locally, fetching v${QUARK_AWSLC_VERSION} from github")
+        FetchContent_Declare(
+            aws-lc
+            GIT_REPOSITORY https://github.com/aws/aws-lc.git
+            GIT_TAG        v${QUARK_AWSLC_VERSION}
+        )
+        # libssl + libcrypto only, static and PIC (it may end up inside a shared libquark), and buildable
+        # with neither Go nor Perl (pre-generated assembly). Normal variables, restored below; CMP0077 lets
+        # AWS-LC's option() calls honor them.
+        set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+        set(_quark_saved_shared ${BUILD_SHARED_LIBS})
+        set(_quark_saved_testing ${BUILD_TESTING})
+        set(_quark_saved_pic ${CMAKE_POSITION_INDEPENDENT_CODE})
+        set(BUILD_SHARED_LIBS OFF)
+        set(BUILD_TESTING OFF)
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+        set(BUILD_TOOL OFF)
+        set(BUILD_LIBSSL ON)
+        set(DISABLE_GO ON)
+        set(DISABLE_PERL ON)
+        set(ENABLE_SOURCE_MODIFICATION OFF)
+        FetchContent_MakeAvailable(aws-lc)
+        set(BUILD_SHARED_LIBS ${_quark_saved_shared})
+        set(BUILD_TESTING ${_quark_saved_testing})
+        set(CMAKE_POSITION_INDEPENDENT_CODE ${_quark_saved_pic})
+        unset(CMAKE_POLICY_DEFAULT_CMP0077)
+        if (QUARK_MASTER_PROJECT AND CMAKE_INSTALL_PREFIX MATCHES "^/usr(/local)?/?$")
+            # AWS-LC installs include/openssl and libssl/libcrypto, which would shadow the system OpenSSL
+            message(WARNING "The fetched AWS-LC is installed along with quark into ${CMAKE_INSTALL_PREFIX}, where its "
+                    "openssl/ headers and libssl/libcrypto shadow the system OpenSSL for other software. Prefer a "
+                    "dedicated CMAKE_INSTALL_PREFIX, or install AWS-LC into its own prefix and pass AWSLC_ROOT.")
+        endif ()
+    endif ()
+    if (NOT TARGET AWS::ssl)
+        add_library(AWS::ssl ALIAS ssl)
+        add_library(AWS::crypto ALIAS crypto)
+    endif ()
+    set(QUARK_SSL_LIB AWS::ssl)
+    set(QUARK_CRYPTO_LIB AWS::crypto)
+endif ()
 
 # JsonParser.h pulls simdjson.h into user code, mark it as a system header so its warnings
 # (e.g. -Wredundant-decls) don't break targets built with -Werror
@@ -196,6 +256,7 @@ message(STATUS "QUARK_LOG_HUGE_PAGES: " ${QUARK_LOG_HUGE_PAGES})
 message(STATUS "QUARK_LOG_INITIAL_QUEUE_CAPACITY: " ${QUARK_LOG_INITIAL_QUEUE_CAPACITY})
 message(STATUS "QUARK_LOG_QUEUE_TYPE: " ${QUARK_LOG_QUEUE_TYPE})
 message(STATUS "QUARK_NO_EXCEPTIONS: " ${QUARK_NO_EXCEPTIONS})
+message(STATUS "QUARK_TLS_BACKEND: " ${QUARK_TLS_BACKEND})
 message(STATUS "QUARK_USE_FSTACK: " ${QUARK_USE_FSTACK})
 message(STATUS "QUARK_USE_STD_FORMAT: " ${QUARK_USE_STD_FORMAT})
 
@@ -302,6 +363,7 @@ set(SOURCE_FILES
         src/crypto/Ed25519Signer.cpp
         src/crypto/HmacSha256.cpp
         src/crypto/OpenSslError.h
+        src/TlsBackend.h
 
         src/net/Endpoint.cpp
         src/net/TlsContext.cpp
@@ -322,8 +384,10 @@ endif ()
 add_library(${TARGET_NAME} ${SOURCE_FILES} ${HEADER_FILES})
 add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
-# A shared quark finds its installed dependencies (absl, simdjson) next to itself
+# A shared quark finds its installed dependencies (simdjson) next to itself
 set_target_properties(${TARGET_NAME} PROPERTIES INSTALL_RPATH "$ORIGIN")
+# libquark.so.1 -> libquark.so.1.0.0: the soname changes with the major version (ABI break)
+set_target_properties(${TARGET_NAME} PROPERTIES VERSION ${QUARK_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 
 # Link dependencies
 # quill is PUBLIC: QuarkLog.h macros expand to quill code in the user's translation units
@@ -331,10 +395,8 @@ set_target_properties(${TARGET_NAME} PROPERTIES INSTALL_RPATH "$ORIGIN")
 target_link_libraries(${TARGET_NAME}
         PRIVATE
             $<BUILD_INTERFACE:tomlplusplus::tomlplusplus>
-            absl::strings 
-            absl::flat_hash_map
-            OpenSSL::SSL
-            OpenSSL::Crypto
+            ${QUARK_SSL_LIB}
+            ${QUARK_CRYPTO_LIB}
         PUBLIC
             quill::quill
             simdjson::simdjson
@@ -343,10 +405,16 @@ target_link_libraries(${TARGET_NAME}
 
 target_compile_features(${TARGET_NAME} PUBLIC cxx_std_20)
 
+# Checked against the openssl/ headers actually included (src/TlsBackend.h), so a build that picks up the
+# system OpenSSL headers while linking AWS-LC (or the reverse) fails to compile instead of crashing
+if (QUARK_TLS_BACKEND STREQUAL "AWS-LC")
+    target_compile_definitions(${TARGET_NAME} PRIVATE QUARK_TLS_AWSLC)
+endif ()
+
 # Only QUARK_API symbols are exported from a shared quark; header-only code needs no export
 set_target_properties(${TARGET_NAME} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 if (BUILD_SHARED_LIBS)
-    # keep the symbols of statically linked dependencies (absl, simdjson) out of libquark.so
+    # keep the symbols of statically linked dependencies (simdjson, AWS-LC) out of libquark.so
     target_link_options(${TARGET_NAME} PRIVATE "LINKER:--exclude-libs,ALL")
 endif ()
 
@@ -373,12 +441,16 @@ if (QUARK_USE_FSTACK)
     target_compile_options(${TARGET_NAME} PRIVATE ${DPDK_CFLAGS_OTHER})
     # --whole-archive: F-Stack registers its DPDK drivers from static constructors that would
     # otherwise be dropped as unreferenced. The FreeBSD-derived subsystems inside libfstack.a
-    # need zlib, pcap, numa and OpenSSL after it.
+    # need zlib, pcap, numa and libcrypto after it (only RAND_bytes, which AWS-LC provides too,
+    # so libfstack.a built against the system OpenSSL links against AWS-LC unchanged).
     target_link_options(${TARGET_NAME} PUBLIC
             -L${FSTACK_PREFIX}/lib
             ${DPDK_STATIC_LDFLAGS}
             "SHELL:-Wl,--whole-archive,-lfstack,--no-whole-archive"
-            -pthread -lm -lrt -ldl -lnuma -lz -lpcap -lssl -lcrypto)
+            -pthread -lm -lrt -ldl -lnuma -lz -lpcap)
+    # PUBLIC: libfstack.a lands in the user's executable, which must resolve its RAND_bytes too (a
+    # shared quark hides its own copy of libcrypto); link libraries come after the options above
+    target_link_libraries(${TARGET_NAME} PUBLIC ${QUARK_CRYPTO_LIB})
 endif ()
 
 if (QUARK_NO_EXCEPTIONS)
@@ -394,6 +466,16 @@ endif ()
 if (QUARK_USE_STD_FORMAT)
     target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_USE_STD_FORMAT)
 endif ()
+
+# QuarkLog.cpp static_asserts that the quill it compiles against is QUARK_QUILL_VERSION
+string(REPLACE "." ";" _quark_quill_version_parts ${QUARK_QUILL_VERSION})
+list(GET _quark_quill_version_parts 0 _quark_quill_major)
+list(GET _quark_quill_version_parts 1 _quark_quill_minor)
+list(GET _quark_quill_version_parts 2 _quark_quill_patch)
+target_compile_definitions(${TARGET_NAME} PRIVATE
+        QUARK_QUILL_VERSION_MAJOR=${_quark_quill_major}
+        QUARK_QUILL_VERSION_MINOR=${_quark_quill_minor}
+        QUARK_QUILL_VERSION_PATCH=${_quark_quill_patch})
 
 # PUBLIC: quark::FrontendOptions defined in QuarkLog.h, quark users must agree on it
 target_compile_definitions(${TARGET_NAME} PUBLIC
@@ -467,18 +549,22 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     if (QUARK_USE_FSTACK)
         string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_USE_FSTACK -I${FSTACK_PREFIX}/include")
         string(JOIN " " DPDK_STATIC_LDFLAGS_STR ${DPDK_STATIC_LDFLAGS})
-        set(QUARK_PKGCONFIG_LIBS_EXTRA " -L${FSTACK_PREFIX}/lib ${DPDK_STATIC_LDFLAGS_STR} -Wl,--whole-archive,-lfstack,--no-whole-archive -lm -lrt -ldl -lnuma -lz -lpcap -lssl -lcrypto")
+        set(QUARK_PKGCONFIG_LIBS_EXTRA " -L${FSTACK_PREFIX}/lib ${DPDK_STATIC_LDFLAGS_STR} -Wl,--whole-archive,-lfstack,--no-whole-archive -lm -lrt -ldl -lnuma -lz -lpcap")
     endif ()
 
-    # absl and OpenSSL (libssl, libcrypto) are PRIVATE, but a static quark still needs them on the user's link
-    # line, and pkg-config only adds Requires.private libs with --static, so promote them to Requires
-    # for static builds
+    # The TLS backend (libssl, libcrypto) is PRIVATE, but a static quark still needs it on the
+    # user's link line, and pkg-config only adds Requires.private libs with --static, so promote them to
+    # Requires for static builds. AWS-LC installs libssl.pc / libcrypto.pc under the same names as OpenSSL:
+    # PKG_CONFIG_PATH decides which one is found, so it must list the AWS-LC prefix first.
     set(QUARK_PKGCONFIG_REQUIRES "quill simdjson")
     set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "")
     if (BUILD_SHARED_LIBS)
-        set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "absl_strings absl_flat_hash_map libssl libcrypto")
+        set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "libssl libcrypto")
+        if (QUARK_USE_FSTACK)
+            string(APPEND QUARK_PKGCONFIG_REQUIRES " libcrypto")  # libfstack.a in the user's executable
+        endif ()
     else ()
-        string(APPEND QUARK_PKGCONFIG_REQUIRES " absl_strings absl_flat_hash_map libssl libcrypto")
+        string(APPEND QUARK_PKGCONFIG_REQUIRES " libssl libcrypto")
     endif ()
 
     # ---- pkg-config ---- #
@@ -495,7 +581,7 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     write_basic_package_version_file(
             ${version_config}
             VERSION ${QUARK_VERSION}
-            COMPATIBILITY AnyNewerVersion)
+            COMPATIBILITY SameMajorVersion)  # semver: find_package(quark 1.x) must not accept 2.0
 
     configure_package_config_file(
             ${CMAKE_CURRENT_LIST_DIR}/cmake/quark-config.cmake.in

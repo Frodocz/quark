@@ -590,7 +590,8 @@ private:
         if (on_message_) on_message_(Message{op, payload, capacity, recv_ns_});
     }
 
-    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void protocol_error(const char* what) {
+    // `what` only goes to the log: unused with QUARK_ENABLE_LOGGER=OFF
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void protocol_error([[maybe_unused]] const char* what) {
         QUARK_LOG_WARN("ws {}: protocol error: {}", host_, what);
         teardown(true, true);
     }

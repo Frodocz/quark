@@ -7,6 +7,14 @@
 
 QUARK_BEGIN_NAMESPACE
 
+// rdtsc(): raw TSC ticks. tscns(): nanoseconds since the epoch from the TSC, ~10x cheaper than
+// the system clock; the first call blocks ~20 ms to calibrate. sysns(): the system clock itself
+// (std::chrono::system_clock), the source of truth for wall time.
+//
+// tscns() tracks the system clock only if calibrate() runs at least every few seconds, from a
+// single thread. quark's log backend does it (quill's backend thread, or the thread running
+// LogPoller) once init_log() has run; a process without quark logging must call calibrate()
+// itself, e.g. once a second from a housekeeping thread, and never from two threads.
 class QUARK_API RdtscClock
 {
 public:

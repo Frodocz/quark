@@ -1,6 +1,8 @@
 #include "quark/net/BufferPool.h"
 #include "gtest/gtest.h"
 
+#include "QuarkTest.h"
+
 #include <cstring>
 #include <set>
 #include <type_traits>
@@ -73,8 +75,8 @@ TEST_F(TestBufferPool, HeadroomBounds) {
 }
 
 TEST_F(TestBufferPool, InvalidArgumentsThrow) {
-    EXPECT_THROW(BufferPool(0, 64), QuarkError);
-    EXPECT_THROW(BufferPool(4, 0), QuarkError);
+    QUARK_EXPECT_ERROR(BufferPool(0, 64), "invalid buffer count or size");
+    QUARK_EXPECT_ERROR(BufferPool(4, 0), "invalid buffer count or size");
 }
 
 TEST_F(TestBufferPool, ExhaustionAndReuse) {
@@ -144,7 +146,7 @@ TEST_F(TestBufferPool, SharedArena) {
     recv.release(r);
     send.release(s);
 
-    EXPECT_THROW(BufferPool(arena, 64, 8192), QuarkError);  // doesn't fit in what's left
+    QUARK_EXPECT_ERROR(BufferPool(arena, 64, 8192), "not enough space left in the arena");  // doesn't fit
 }
 
 TEST_F(TestBufferPool, PrependAppendConsume) {

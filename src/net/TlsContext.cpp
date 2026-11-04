@@ -26,9 +26,6 @@ namespace {
 
 [[noreturn]] void throw_ssl(const char* what) {
     QUARK_THROW(QuarkError{std::string("TlsContext: ") + what + ": " + detail::openssl_error_string()});
-#if defined(QUARK_NO_EXCEPTIONS)
-    std::abort();  // unreachable: QUARK_THROW aborts
-#endif
 }
 
 } // namespace
@@ -39,7 +36,7 @@ TlsContext::TlsContext(const Options& options)
     if (ctx_ == nullptr) throw_ssl("SSL_CTX_new failed");
 
     // TLS 1.2 floor; prefer AES-128-GCM for TLS 1.3 (AES-NI, 10 rounds vs 14 for AES-256),
-    // which OpenSSL otherwise ranks after AES-256-GCM
+    // which OpenSSL otherwise ranks after AES-256-GCM (AWS-LC already ranks it first)
     if (::SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION) != 1) throw_ssl("set_min_proto_version failed");
     if (::SSL_CTX_set_ciphersuites(ctx_, "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256") != 1) {
         throw_ssl("set_ciphersuites failed");
@@ -80,7 +77,8 @@ TlsContext::TlsContext(const Options& options)
 
     // SSL_write() may return after one record of a large buffer, like a partial send()
     ::SSL_CTX_set_mode(ctx_, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
-    QUARK_LOG_INFO("TlsContext ready (verify_peer={}, session_resumption={})", verify_peer_, session_resumption_);
+    QUARK_LOG_INFO("TlsContext ready ({}, verify_peer={}, session_resumption={})", ::OpenSSL_version(OPENSSL_VERSION),
+                   verify_peer_, session_resumption_);
 }
 
 TlsContext::~TlsContext() { ::SSL_CTX_free(ctx_); }

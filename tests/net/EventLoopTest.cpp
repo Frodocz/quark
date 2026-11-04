@@ -2,6 +2,8 @@
 #include "quark/net/EventLoop.h"
 #include "gtest/gtest.h"
 
+#include "QuarkTest.h"
+
 #include <unistd.h>
 
 #include <algorithm>
@@ -80,9 +82,10 @@ TEST_P(TestEventLoop, AddWhileStepping) {
 }
 
 TEST_P(TestEventLoop, BatchLimitIsValidatedAndNothingBeyondItIsDropped) {
-    EXPECT_THROW(EventLoop({.busy_poll = GetParam(), .max_events = 0}), QuarkError);
-    EXPECT_THROW(EventLoop({.busy_poll = GetParam(), .max_events = Poller::kMaxEvents + 1}), QuarkError);
-    EXPECT_NO_THROW(EventLoop({.busy_poll = GetParam(), .max_events = Poller::kMaxEvents}));
+    QUARK_EXPECT_ERROR(EventLoop({.busy_poll = GetParam(), .max_events = 0}), "max_events must be within");
+    QUARK_EXPECT_ERROR(EventLoop({.busy_poll = GetParam(), .max_events = Poller::kMaxEvents + 1}),
+                       "max_events must be within");
+    (void)EventLoop({.busy_poll = GetParam(), .max_events = Poller::kMaxEvents});  // the maximum is accepted
     EventLoop loop({.busy_poll = GetParam(), .max_events = 8});
     std::vector<std::unique_ptr<PipePollable>> ps;
     for (int i = 0; i < 20; ++i) {

@@ -10,7 +10,8 @@ Versions this guide was tested with:
 
 | Component | Version | Note |
 |---|---|---|
-| F-Stack | v2.0 (tag `v2.0`, 2026-10-20) | plus [patches/f-stack-2.0-eal-argv-double-free.patch](patches/f-stack-2.0-eal-argv-double-free.patch) |
+| F-Stack | v2.0 (tag `v2.0`, 2026-10-20) | plus [f-stack-2.0-eal-argv-double-free.patch](f-stack-2.0-eal-argv-double-free.patch), merged upstream into `dev` ([#1098](https://github.com/F-Stack/f-stack/pull/1098), 2026-10-27) but in no release yet |
+| TLS library | AWS-LC 5.12.0 (quark's default) or OpenSSL 3 | `libfstack.a` itself compiles against the system OpenSSL headers; see section 4 |
 | DPDK | 24.11.8 LTS | bundled in the F-Stack tree (`dpdk/`); use that copy, not a separate DPDK |
 | Kernel / compiler | Ubuntu 22.04, 6.8.0-aws, gcc-12 | |
 | Instance | AMD EPYC 7R13 (no AVX-512), ENA | |
@@ -28,8 +29,12 @@ Get the sources (one checkout per F-Stack version keeps the previous one for rol
 ```sh
 git clone https://github.com/F-Stack/f-stack.git /data/f-stack
 cd /data/f-stack && git worktree add --detach /data/f-stack-2.0 v2.0
-cd /data/f-stack-2.0 && git apply ~/codes/quark/doc/patches/f-stack-2.0-eal-argv-double-free.patch
+cd /data/f-stack-2.0 && git apply ~/codes/quark/doc/f-stack-2.0-eal-argv-double-free.patch
 ```
+
+The patch fixes a double free when `ff_run()` returns (section 9). It is merged into F-Stack's `dev`
+branch (PR #1098, commit `d0ddc6ab`), so skip it when building `dev` or a release after v2.0;
+`git apply` fails there because the change is already in.
 
 ## 2. Build DPDK
 
@@ -131,6 +136,12 @@ cmake --build build-fstack -j$(nproc)
 
 DPDK is found through pkg-config (`PKG_CONFIG_PATH` as above if CMake doesn't find `libdpdk`).
 Rebuild quark after rebuilding DPDK or F-Stack: both are linked statically.
+
+TLS: quark uses AWS-LC by default (`-DQUARK_TLS_BACKEND=AWS-LC`, see the README), also under
+F-Stack. `libfstack.a` needs a single libcrypto function, `RAND_bytes` (its `arc4random`), and DPDK
+none, so the `libfstack.a` built above against the system OpenSSL headers (`libssl-dev`) links
+against AWS-LC unchanged and the process holds no OpenSSL. `-DQUARK_TLS_BACKEND=OpenSSL` links the
+system OpenSSL instead. Both pass `quark_test_fstack`.
 
 ## 5. Prepare the host (every boot)
 
@@ -286,7 +297,7 @@ today, run one process per DPDK ENI.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Illegal instruction` (SIGILL) in any binary linking `libfstack.a`, before `main()`, in `rte_log_register_*` | DPDK (and F-Stack) built with `-march=native` on a CPU with instructions this one lacks | rebuild with `-Dcpu_instruction_set=x86-64-v3` (section 2), then F-Stack, then quark |
-| `free(): double free detected` or `malloc_consolidate(): invalid chunk size` when `ff_run()` returns | F-Stack 2.0 bug: `rte_eal_init()` aliases two `dpdk_argv` entries and `ff_unload_config()` frees both | apply `patches/f-stack-2.0-eal-argv-double-free.patch` |
+| `free(): double free detected` or `malloc_consolidate(): invalid chunk size` when `ff_run()` returns | F-Stack 2.0 bug: `rte_eal_init()` aliases two `dpdk_argv` entries and `ff_unload_config()` frees both | apply `f-stack-2.0-eal-argv-double-free.patch` (section 1); fixed upstream in `dev` (PR #1098) |
 | `insmod: ERROR: could not insert module igb_uio.ko: Invalid module format` | kernel updated since DPDK was built | `ninja -C dpdk/build` (rebuilds the module) |
 | `no installation of DPDK found` from F-Stack's make | `PKG_CONFIG_PATH` unset (or dropped by `sudo`) | section 3 |
 | `EAL: No available 2048 kB hugepages reported` / mempool creation fails | huge pages not reserved | section 5 |

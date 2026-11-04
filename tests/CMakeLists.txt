@@ -29,6 +29,7 @@ function(quark_add_test test_target source_file)
     target_link_libraries(${test_target} PRIVATE quark::quark GTest::gtest_main)
     target_compile_definitions(${test_target} PRIVATE
             QUARK_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    target_include_directories(${test_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})  # QuarkTest.h
 
     # PRE_TEST: discover the cases when ctest runs, so a crashing test binary doesn't break the build
     gtest_discover_tests(${test_target} DISCOVERY_MODE PRE_TEST)
@@ -36,11 +37,12 @@ endfunction()
 
 # core: configuration and logging
 quark_add_test(quark_test_config_log core/ConfigLogTest.cpp)
+quark_add_test(quark_test_fatal core/FatalTest.cpp)
 
 # crypto
 quark_add_test(quark_test_encoding crypto/EncodingTest.cpp)
 quark_add_test(quark_test_crypto crypto/SignerTest.cpp)
-target_link_libraries(quark_test_crypto PRIVATE OpenSSL::Crypto)  # reference HMAC values
+target_link_libraries(quark_test_crypto PRIVATE ${QUARK_CRYPTO_LIB})  # reference HMAC values
 
 # maths
 quark_add_test(quark_test_double_ops math/DoubleOpsTest.cpp)
@@ -58,14 +60,14 @@ quark_add_test(quark_test_ws_handshake net/WsHandshakeTest.cpp)
 
 if (NOT QUARK_USE_FSTACK)
     # event loop and integration tests against loopback TCP/TLS servers (tests/net/TestServers.h,
-    # OpenSSL server side); they need kernel sockets
+    # blocking libssl server side); they need kernel sockets
     quark_add_test(quark_test_event_loop net/EventLoopTest.cpp)
     quark_add_test(quark_test_tcp_socket net/TcpSocketTest.cpp)
     quark_add_test(quark_test_tls_stream net/TlsStreamTest.cpp)
     quark_add_test(quark_test_ws_session net/WsSessionTest.cpp)
     quark_add_test(quark_test_http_client net/HttpClientTest.cpp)
     foreach (net_test quark_test_tcp_socket quark_test_tls_stream quark_test_ws_session quark_test_http_client)
-        target_link_libraries(${net_test} PRIVATE OpenSSL::SSL)
+        target_link_libraries(${net_test} PRIVATE ${QUARK_SSL_LIB})
     endforeach ()
 else ()
     # F-Stack: one binary with its own main (F-Stack's loop must own the main thread). It needs root
@@ -73,7 +75,7 @@ else ()
     # sudo ctest -L fstack. By hand: sudo ./quark_test_fstack --conf <f-stack.conf>.
     add_executable(quark_test_fstack net/FStackTest.cpp)
     quark_set_common_compile_options(quark_test_fstack)
-    target_link_libraries(quark_test_fstack PRIVATE quark::quark GTest::gtest OpenSSL::SSL)
+    target_link_libraries(quark_test_fstack PRIVATE quark::quark GTest::gtest ${QUARK_SSL_LIB})
     target_compile_definitions(quark_test_fstack PRIVATE QUARK_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     set(QUARK_FSTACK_TEST_CONF "${PROJECT_SOURCE_DIR}/doc/f-stack.conf.example" CACHE FILEPATH
         "F-Stack config for quark_test_fstack under ctest (empty: not registered)")
@@ -103,4 +105,5 @@ quark_add_test(quark_test_mmap_file utils/MMapFileTest.cpp)
 quark_add_test(quark_test_simple_object_pool utils/SimpleObjectPoolTest.cpp)
 quark_add_test(quark_test_system utils/SystemTest.cpp)
 quark_add_test(quark_test_timer_queue utils/TimerQueueTest.cpp)
+quark_add_test(quark_test_date_time utils/DateTimeTest.cpp)
 quark_add_test(quark_test_trading_day utils/TradingDayTest.cpp)

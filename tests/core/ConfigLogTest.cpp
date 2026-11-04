@@ -5,7 +5,12 @@
 
 #include <gtest/gtest.h>
 
+#include "QuarkTest.h"
+
 #include <filesystem>
+#include <regex>
+#include <string>
+#include <vector>
 
 using namespace quark;
 
@@ -16,7 +21,7 @@ TEST(ConfigLogTest, AssertIsASingleStatement) {
         QUARK_ASSERT(taken == 0);
     else
         ++taken;
-    EXPECT_THROW(QUARK_ASSERT(taken == 1), QuarkError);
+    QUARK_EXPECT_ERROR(QUARK_ASSERT(taken == 1), "Assert failed: taken == 1");
 }
 
 TEST(ConfigLogTest, LoadFailuresReportWithoutCreatingTheLogger) {
@@ -44,16 +49,12 @@ TEST(ConfigLogTest, TypedLookups) {
 TEST(ConfigLogTest, BadLevelIsAQuarkErrorNamingTheKey) {
     auto cfg = QuarkConfig::load_string("[log.net]\nlevel = \"verbose\"\n");
     ASSERT_TRUE(cfg.has_value());
-    try {
-        (void)LogConfig::load_from_config(*cfg);
-        FAIL() << "expected QuarkError";
-    } catch (const QuarkError& e) {
-        EXPECT_NE(std::string_view(e.what()).find("log.net.level"), std::string_view::npos) << e.what();
-    }
+    QUARK_EXPECT_ERROR((void)LogConfig::load_from_config(*cfg), "log\\.net\\.level: invalid log level 'verbose'");
 }
 
 TEST(ConfigLogTest, FailedInitCanBeRetried) {
     const auto dir = std::filesystem::temp_directory_path() / "quark_config_log_test";
+    std::filesystem::remove_all(dir);  // leftovers of a crashed run
     std::filesystem::create_directories(dir);
     LogConfig bad;
     LogOptions opts;
@@ -61,7 +62,7 @@ TEST(ConfigLogTest, FailedInitCanBeRetried) {
     opts.filename = (dir / "net.log").string();
     opts.daily_rotation_time = "25:99";  // rejected by the file sink
     bad.loggers.emplace("net", opts);
-    EXPECT_ANY_THROW(init_log(bad));
+    QUARK_EXPECT_ANY_ERROR(init_log(bad));  // quill rejects the rotation time
 
     LogConfig good = bad;
     good.loggers.at("net").daily_rotation_time = "00:00";
@@ -69,6 +70,13 @@ TEST(ConfigLogTest, FailedInitCanBeRetried) {
     Logger* net = get_logger("net");
     ASSERT_NE(net, nullptr);
     QUARK_LOG_INFO("logging works after a failed init_log()");
+    QLOG_INFO(net, "net logs to its file");
     shutdown_log();
+    // the file name carries the process start time: net.log -> net_YYYYMMDD_HHMMSS.log
+    std::vector<std::string> files;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) files.push_back(entry.path().filename().string());
+    ASSERT_EQ(files.size(), 1u);
+    EXPECT_TRUE(std::regex_match(files[0], std::regex{R"(net_\d{8}_\d{6}\.log)"})) << files[0];
+    EXPECT_GT(std::filesystem::file_size(dir / files[0]), 0u);
     std::filesystem::remove_all(dir);
 }
