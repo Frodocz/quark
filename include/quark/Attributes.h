@@ -29,9 +29,6 @@ inline constexpr int kVersion{QUARK_VERSION_MAJOR * 10000 + QUARK_VERSION_MINOR 
 
 QUARK_END_NAMESPACE
 
-/// The global name of 1.0.0, kept until 2.0 for compatibility: it collides with any other global `Version`
-[[deprecated("use quark::kVersion")]] inline constexpr int Version{quark::kVersion};
-
 /**
  * __has_include
  */
