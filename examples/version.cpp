@@ -4,6 +4,6 @@
 
 int main() {
     std::cout << "Hello Quark(" << QUARK_VERSION_MAJOR << "." << QUARK_VERSION_MINOR
-              << "." << QUARK_VERSION_PATCH << ")" << std::endl;
+              << "." << QUARK_VERSION_PATCH << "), kVersion " << quark::kVersion << std::endl;
     return 0;
 }

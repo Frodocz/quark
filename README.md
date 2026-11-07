@@ -46,6 +46,7 @@ and lock-free queues for quickly start some latency-sensitive applications such 
 |---------------------|---------------------------------------------------------------------------------------------------------------------|
 | **Memory Arena**    | Backbone of internal modules like `net`, providing `IOBuffer`, `CircularBuffer` and `BufferPool`                    |
 | **Configuration**   | `TOML` used for personal preference, wrapping [toml++](https://github.com/marzer/tomlplusplus)                      |
+| **Enum Reflection** | `QuarkEnum.h`: enum <-> string and validated value casts, wrapping [magic_enum](https://github.com/Neargye/magic_enum) |
 | **Crypto**          | `HMAC-SHA256` and `Ed25519` request signing, base64/hex, on [AWS-LC](https://github.com/aws/aws-lc) (default) or OpenSSL 3 |
 | **Fixed-Point**     | Fixed-point numbers are needed in financial systems to prevent tiny rounding errors from binary math                |
 | **Lock-Free Queues**| Lock-free [SPSC queues](https://github.com/MengRao/SPSC_Queue) for high-performance, low-latency and predictable concurrent systems |
@@ -218,6 +219,7 @@ Quark is licensed under the [MIT License](https://opensource.org/licenses/MIT).
 Quark depends on third party libraries with separate copyright notices and license terms.
 Your use of the source code for these subcomponents is subject to the terms and conditions of the following licenses.
 
+- ([MIT License](https://opensource.org/licenses/MIT)) [magic_enum](https://github.com/Neargye/magic_enum/blob/master/LICENSE)
 - ([MIT License](https://opensource.org/licenses/MIT)) [quill](https://github.com/odygrd/quill/blob/master/LICENSE)
 - ([MIT License](https://opensource.org/licenses/MIT)) [SPSC_Queue](https://github.com/MengRao/SPSC_Queue/blob/master/LICENSE)
 - ([MIT License](https://opensource.org/licenses/MIT)) [toml++](https://github.com/marzer/tomlplusplus/blob/master/LICENSE)

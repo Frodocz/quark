@@ -19,9 +19,18 @@
 #define QUARK_API __attribute__((visibility("default")))
 
 constexpr inline int QUARK_VERSION_MAJOR{1};
-constexpr inline int QUARK_VERSION_MINOR{0};
+constexpr inline int QUARK_VERSION_MINOR{1};
 constexpr inline int QUARK_VERSION_PATCH{0};
-inline constexpr int Version{QUARK_VERSION_MAJOR * 10000 + QUARK_VERSION_MINOR * 100 + QUARK_VERSION_PATCH};
+
+QUARK_BEGIN_NAMESPACE
+
+/// major * 10000 + minor * 100 + patch
+inline constexpr int kVersion{QUARK_VERSION_MAJOR * 10000 + QUARK_VERSION_MINOR * 100 + QUARK_VERSION_PATCH};
+
+QUARK_END_NAMESPACE
+
+/// The global name of 1.0.0, kept until 2.0 for compatibility: it collides with any other global `Version`
+[[deprecated("use quark::kVersion")]] inline constexpr int Version{quark::kVersion};
 
 /**
  * __has_include

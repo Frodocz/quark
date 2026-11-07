@@ -38,6 +38,8 @@ endfunction()
 # core: configuration and logging
 quark_add_test(quark_test_config_log core/ConfigLogTest.cpp)
 quark_add_test(quark_test_fatal core/FatalTest.cpp)
+quark_add_test(quark_test_enum core/EnumTest.cpp)
+quark_add_test(quark_test_version core/VersionTest.cpp)
 
 # crypto
 quark_add_test(quark_test_encoding crypto/EncodingTest.cpp)

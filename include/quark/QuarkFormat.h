@@ -9,6 +9,7 @@
         using std::format;
         using std::format_string;
         using std::format_to;
+        using std::format_to_n;
 
         template <typename... Args>
         void print(std::ostream& os, std::format_string<Args...> fmt, Args&&... args) {
@@ -25,6 +26,7 @@
         using fmtquill::format_int;
         using fmtquill::format_string;
         using fmtquill::format_to;
+        using fmtquill::format_to_n;
         using fmtquill::print; // fmt::print(std::ostream&, ...)
     } // namespace quark::fmtlib
 #endif

@@ -46,6 +46,8 @@ if (NOT QUARK_LOG_QUEUE_TYPE MATCHES "^(UnboundedBlocking|UnboundedDropping|Boun
 endif ()
 # Every module of a process must use the same quill, also checked by a static_assert in QuarkLog.cpp
 set(QUARK_QUILL_VERSION 13.1.0)
+# magic_enum is header-only and exposed through QuarkEnum.h: every module of a process must use the same one
+set(QUARK_MAGIC_ENUM_VERSION 0.9.8)
 
 #-------------------------------------------------------------------------------------------------------
 # Determine if quark is built as a subproject (using add_subdirectory) or if it is the master project.
@@ -133,6 +135,10 @@ set(QUARK_USE_STD_FORMAT OFF)
 set(SIMDJSON_INSTALL ON CACHE BOOL "" FORCE)
 # quill is exposed through QuarkLog.h, so it installs its own headers, config and targets alongside quark
 set(QUILL_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
+# magic_enum is exposed through QuarkEnum.h, same as quill; its tests and examples are not built
+set(MAGIC_ENUM_OPT_INSTALL ON CACHE BOOL "" FORCE)
+set(MAGIC_ENUM_OPT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MAGIC_ENUM_OPT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # GCC 13.1 and above fully support std::format
@@ -196,17 +202,25 @@ else ()
         set(DISABLE_GO ON)
         set(DISABLE_PERL ON)
         set(ENABLE_SOURCE_MODIFICATION OFF)
+        # AWS-LC warns `if (DEFINED ENABLE_PRE_SONAME_BUILD)` before its own option() caches that variable, so every
+        # re-configure warns although nobody set it. It only matters for a shared AWS-LC, never built here.
+        unset(ENABLE_PRE_SONAME_BUILD CACHE)
         FetchContent_MakeAvailable(aws-lc)
         set(BUILD_SHARED_LIBS ${_quark_saved_shared})
         set(BUILD_TESTING ${_quark_saved_testing})
         set(CMAKE_POSITION_INDEPENDENT_CODE ${_quark_saved_pic})
         unset(CMAKE_POLICY_DEFAULT_CMP0077)
-        if (QUARK_MASTER_PROJECT AND CMAKE_INSTALL_PREFIX MATCHES "^/usr(/local)?/?$")
-            # AWS-LC installs include/openssl and libssl/libcrypto, which would shadow the system OpenSSL
-            message(WARNING "The fetched AWS-LC is installed along with quark into ${CMAKE_INSTALL_PREFIX}, where its "
-                    "openssl/ headers and libssl/libcrypto shadow the system OpenSSL for other software. Prefer a "
-                    "dedicated CMAKE_INSTALL_PREFIX, or install AWS-LC into its own prefix and pass AWSLC_ROOT.")
-        endif ()
+        # AWS-LC installs include/openssl and libssl/libcrypto, which shadow the system OpenSSL in /usr or /usr/local.
+        # Checked when installing, against the prefix actually used (`cmake --install --prefix` overrides the
+        # configured one), so configuring alone, or installing into a dedicated prefix, doesn't warn.
+        install(CODE [[
+            if (CMAKE_INSTALL_PREFIX MATCHES "^/usr(/local)?/?$")
+                message(WARNING "The fetched AWS-LC is installed along with quark into ${CMAKE_INSTALL_PREFIX}, where "
+                        "its openssl/ headers and libssl/libcrypto shadow the system OpenSSL for other software. "
+                        "Prefer a dedicated prefix (cmake --install <build> --prefix /opt/quark), or install AWS-LC "
+                        "into its own prefix and pass AWSLC_ROOT when configuring quark.")
+            endif ()
+        ]])
     endif ()
     if (NOT TARGET AWS::ssl)
         add_library(AWS::ssl ALIAS ssl)
@@ -232,6 +246,27 @@ if (NOT TARGET quill::quill)
         GIT_TAG        v${QUARK_QUILL_VERSION}
     )
     FetchContent_MakeAvailable(quill)
+endif ()
+
+# Reuse the magic_enum of the parent project or of the system, fetch it otherwise
+if (NOT TARGET magic_enum::magic_enum)
+    find_package(magic_enum ${QUARK_MAGIC_ENUM_VERSION} EXACT CONFIG QUIET)
+endif ()
+if (NOT TARGET magic_enum::magic_enum)
+    FetchContent_Declare(
+        magic_enum
+        GIT_REPOSITORY https://github.com/Neargye/magic_enum.git
+        GIT_TAG        v${QUARK_MAGIC_ENUM_VERSION}
+    )
+    FetchContent_MakeAvailable(magic_enum)
+endif ()
+# QuarkEnum.h pulls magic_enum.hpp into user code, mark it as a system header (as simdjson above), so its
+# warnings don't break targets built with -Werror
+get_target_property(_quark_magic_enum_target magic_enum::magic_enum ALIASED_TARGET)
+if (_quark_magic_enum_target)
+    get_target_property(MAGIC_ENUM_INCLUDE_DIRS ${_quark_magic_enum_target} INTERFACE_INCLUDE_DIRECTORIES)
+    set_target_properties(${_quark_magic_enum_target} PROPERTIES
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${MAGIC_ENUM_INCLUDE_DIRS}")
 endif ()
 
 #-------------------------------------------------------------------------------------------------------
@@ -299,6 +334,7 @@ set(TARGET_NAME quark)
 set(HEADER_FILES
         include/quark/Attributes.h
         include/quark/QuarkConfig.h
+        include/quark/QuarkEnum.h
         include/quark/QuarkError.h
         include/quark/QuarkFormat.h
         include/quark/QuarkLog.h
@@ -392,6 +428,7 @@ set_target_properties(${TARGET_NAME} PROPERTIES VERSION ${QUARK_VERSION} SOVERSI
 # Link dependencies
 # quill is PUBLIC: QuarkLog.h macros expand to quill code in the user's translation units
 # simdjson is PUBLIC: JsonParser.h includes simdjson.h and returns simdjson types
+# magic_enum is PUBLIC: QuarkEnum.h is a header-only wrapper of it, instantiated in the user's translation units
 target_link_libraries(${TARGET_NAME}
         PRIVATE
             $<BUILD_INTERFACE:tomlplusplus::tomlplusplus>
@@ -400,6 +437,7 @@ target_link_libraries(${TARGET_NAME}
         PUBLIC
             quill::quill
             simdjson::simdjson
+            magic_enum::magic_enum
             Threads::Threads
 )
 
@@ -463,8 +501,10 @@ if (QUARK_ENABLE_ASSERTIONS)
     target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_ENABLE_ASSERTIONS)
 endif ()
 
+# PUBLIC: QuarkFormat.h selects std::format or quill's bundled fmt with it, and quark's inline headers that format
+# (e.g. FullDuplexShm.h) must be compiled the same way in quark and in the user's translation units (ODR)
 if (QUARK_USE_STD_FORMAT)
-    target_compile_definitions(${TARGET_NAME} PRIVATE -DQUARK_USE_STD_FORMAT)
+    target_compile_definitions(${TARGET_NAME} PUBLIC QUARK_USE_STD_FORMAT)
 endif ()
 
 # QuarkLog.cpp static_asserts that the quill it compiles against is QUARK_QUILL_VERSION
@@ -525,7 +565,9 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     set(QUARK_INC_DIR ${CMAKE_INSTALL_INCLUDEDIR} CACHE STRING
             "Installation directory for include files, relative to ${CMAKE_INSTALL_PREFIX}.")
 
-    set(QUARK_PKGCONFIG_DIR ${CMAKE_INSTALL_LIBDIR}/pkgconfig CACHE PATH
+    # STRING, not PATH: a relative -DQUARK_PKGCONFIG_DIR=... must stay relative to the prefix (a PATH cache entry
+    # given on the command line is made absolute against the current directory)
+    set(QUARK_PKGCONFIG_DIR ${CMAKE_INSTALL_LIBDIR}/pkgconfig CACHE STRING
             "Installation directory for pkgconfig (.pc) files, relative to ${CMAKE_INSTALL_PREFIX}.")
 
     # Use the thread lib flag that find_package(Threads) resolved for this platform
@@ -545,6 +587,9 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     if (QUARK_NO_EXCEPTIONS)
         string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_NO_EXCEPTIONS -DQUILL_NO_EXCEPTIONS")
     endif ()
+    if (QUARK_USE_STD_FORMAT)
+        string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_USE_STD_FORMAT")
+    endif ()
     set(QUARK_PKGCONFIG_LIBS_EXTRA "")
     if (QUARK_USE_FSTACK)
         string(APPEND QUARK_PKGCONFIG_CFLAGS " -DQUARK_USE_FSTACK -I${FSTACK_PREFIX}/include")
@@ -556,7 +601,7 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     # user's link line, and pkg-config only adds Requires.private libs with --static, so promote them to
     # Requires for static builds. AWS-LC installs libssl.pc / libcrypto.pc under the same names as OpenSSL:
     # PKG_CONFIG_PATH decides which one is found, so it must list the AWS-LC prefix first.
-    set(QUARK_PKGCONFIG_REQUIRES "quill simdjson")
+    set(QUARK_PKGCONFIG_REQUIRES "quill simdjson magic_enum")
     set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "")
     if (BUILD_SHARED_LIBS)
         set(QUARK_PKGCONFIG_REQUIRES_PRIVATE "libssl libcrypto")
@@ -568,6 +613,24 @@ if (QUARK_MASTER_PROJECT OR QUARK_ENABLE_INSTALL)
     endif ()
 
     # ---- pkg-config ---- #
+    # The prefix is found relative to the installed quark.pc (${pcfiledir}, supported by pkg-config and pkgconf),
+    # not baked in at configure time: the install tree stays valid with `cmake --install --prefix`, DESTDIR, or
+    # when moved. Absolute install directories (e.g. -DQUARK_INC_DIR=/opt/inc) are used as given.
+    if (IS_ABSOLUTE "${QUARK_PKGCONFIG_DIR}")
+        set(QUARK_PKGCONFIG_PREFIX "${CMAKE_INSTALL_PREFIX}")
+    else ()
+        file(RELATIVE_PATH _quark_pc_to_prefix "${CMAKE_INSTALL_PREFIX}/${QUARK_PKGCONFIG_DIR}" "${CMAKE_INSTALL_PREFIX}")
+        string(REGEX REPLACE "/$" "" _quark_pc_to_prefix "${_quark_pc_to_prefix}")
+        set(QUARK_PKGCONFIG_PREFIX "\${pcfiledir}/${_quark_pc_to_prefix}")
+    endif ()
+    foreach (_quark_pc_dir INC LIB)
+        if (IS_ABSOLUTE "${QUARK_${_quark_pc_dir}_DIR}")
+            set(QUARK_PKGCONFIG_${_quark_pc_dir}_DIR "${QUARK_${_quark_pc_dir}_DIR}")
+        else ()
+            set(QUARK_PKGCONFIG_${_quark_pc_dir}_DIR "\${prefix}/${QUARK_${_quark_pc_dir}_DIR}")
+        endif ()
+    endforeach ()
+
     # Generate pkgconfig
     configure_file(
             "${CMAKE_CURRENT_LIST_DIR}/cmake/quark.pc.in"

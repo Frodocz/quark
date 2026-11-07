@@ -4,6 +4,39 @@ All notable changes to quark are listed here. quark follows [semantic versioning
 the major version changes with incompatible API or ABI changes, so `find_package(quark 1.0)` accepts
 any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
+## [1.1.0]
+
+### Added
+
+- `QuarkEnum.h`: enum reflection wrapping [magic_enum](https://github.com/Neargye/magic_enum) 0.9.8 —
+  `enum_name`, `enum_from_name`, `enum_from_value` (validates enums decoded from untrusted bytes),
+  `enum_count_v`, `enum_values`. magic_enum is a new PUBLIC dependency, pinned like quill: found installed
+  (`EXACT`) or fetched, installed along with quark, and required by `quark-config.cmake` and `quark.pc`.
+- `quark::fmtlib::format_to_n`, for allocation-free formatting into a fixed buffer.
+
+### Changed
+
+- `QUARK_USE_STD_FORMAT` is a PUBLIC compile definition (CMake target and pkg-config). It was private, so
+  `QuarkFormat.h` resolved to `std::format` inside quark but to quill's bundled fmt in user code, and inline
+  headers that format (`FullDuplexShm.h`) were compiled differently on each side (ODR violation) with
+  GCC >= 13 / Clang >= 16.
+
+### Deprecated
+
+- The global `Version` constant: use `quark::kVersion`. A global name collides with any other library's or
+  program's `Version`; the global stays, `[[deprecated]]`, until 2.0.
+
+### Fixed
+
+- `quark.pc` finds its prefix relative to its own location (`${pcfiledir}`) instead of the configure-time
+  `CMAKE_INSTALL_PREFIX`, so it stays valid with `cmake --install --prefix`, `DESTDIR` or a moved install tree.
+- The warning about installing the fetched AWS-LC into `/usr` or `/usr/local` is issued when installing, for
+  the prefix actually used, instead of on every configure (also a false positive with `cmake --install --prefix`).
+- No more AWS-LC `ENABLE_PRE_SONAME_BUILD` deprecation warning on re-configure: AWS-LC warns about its own
+  cached option, which quark now clears before fetching it (irrelevant to the static AWS-LC quark builds).
+- `QUARK_PKGCONFIG_DIR` is a STRING cache entry like the other install directories: as a PATH, a relative value
+  given on the command line was made absolute against the current directory.
+
 ## [1.0.0] - 2026-11-04
 
 First release.
