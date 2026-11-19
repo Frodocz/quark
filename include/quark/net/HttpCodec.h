@@ -2,6 +2,7 @@
 
 #include "quark/Attributes.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -69,6 +70,11 @@ struct HttpResponseView {
     int status{0};
     std::span<const uint8_t> body;  ///< points into the parsed buffer
     std::size_t consumed{0};        ///< bytes of this response (headers + body)
+    std::string_view headers;       ///< the header lines (CRLF separated, no status line), in the buffer
+
+    /// Value of the first header called `name` (any case), trimmed; empty if there is none.
+    /// E.g. header("X-MBX-USED-WEIGHT-1M"), header("Retry-After").
+    [[nodiscard]] std::string_view header(std::string_view name) const noexcept;
 };
 
 namespace detail {
@@ -126,7 +132,30 @@ inline std::size_t parse_chunk_size(std::string_view s) noexcept {
     return v;
 }
 
+/// ASCII case-insensitive comparison of two header names.
+inline bool header_name_equal(std::string_view a, std::string_view b) noexcept {
+    auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (lower(a[i]) != lower(b[i])) return false;
+    }
+    return true;
+}
+
 } // namespace detail
+
+inline std::string_view HttpResponseView::header(std::string_view name) const noexcept {
+    for (std::string_view rest = headers; !rest.empty();) {
+        const std::size_t eol = rest.find("\r\n");
+        const std::string_view line = rest.substr(0, eol);
+        rest = eol == std::string_view::npos ? std::string_view{} : rest.substr(eol + 2);
+        const std::size_t colon = line.find(':');
+        if (colon != std::string_view::npos && detail::header_name_equal(detail::trim(line.substr(0, colon)), name)) {
+            return detail::trim(line.substr(colon + 1));
+        }
+    }
+    return {};
+}
 
 /// Parses an HTTP/1.1 response at the start of `buf`: Content-Length, chunked or (see
 /// close_delimited) close-delimited bodies; 1xx interim responses before it are skipped.
@@ -163,6 +192,8 @@ inline std::size_t parse_chunk_size(std::string_view s) noexcept {
         return next;
     }
     r.keep_alive = status_line.starts_with("HTTP/1.1");  // HTTP/1.0 closes by default
+    const std::size_t headers_start = std::min(status_line.size() + 2, hdr_end);
+    r.headers = s.substr(headers_start, hdr_end - headers_start);
 
     bool chunked = false;
     bool has_length = false;

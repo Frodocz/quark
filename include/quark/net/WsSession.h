@@ -26,7 +26,8 @@ QUARK_BEGIN_NAMESPACE
 namespace net {
 
 enum class WsState : uint8_t { Disconnected, Connecting, Upgrading, Open, Closing };
-enum class WsSendStatus : uint8_t { Ok, WouldBlock, NotOpen, TooLarge };
+/// Dropped: the connection failed while the frame was being written and was torn down with it.
+enum class WsSendStatus : uint8_t { Ok, WouldBlock, NotOpen, TooLarge, Dropped };
 
 /// A received text or binary message, valid only during the on_message callback.
 struct WsMessage {
@@ -52,6 +53,26 @@ struct WsSessionOptions {
     int64_t pong_timeout_ns{0};                  ///< 0: pings without a deadline
     int64_t max_recv_gap_ns{0};                  ///< 0: no receive gap check
     int64_t close_timeout_ns{1'000'000'000};     ///< close(): how long queued frames may take to go out
+    /// Application-level ping (e.g. Bitget's "ping"): sent as a text frame instead of a Ping frame.
+    std::string ping_text{};
+    /// Reply to ping_text (e.g. "pong"): swallowed instead of delivered, and timed for last_rtt_ns().
+    /// Empty: any message received after an application ping counts as its reply.
+    std::string pong_text{};
+
+    // Liveness presets: start every connection from one of these, so none runs unchecked.
+
+    /// Busy public streams: pings and a maximum silence.
+    static WsSessionOptions market_data() {
+        return {.ping_interval_ns = 5'000'000'000, .pong_timeout_ns = 5'000'000'000, .max_recv_gap_ns = 30'000'000'000};
+    }
+    /// Private push streams, silent for long periods: pings only.
+    static WsSessionOptions push_stream() {
+        return {.ping_interval_ns = 10'000'000'000, .pong_timeout_ns = 10'000'000'000};
+    }
+    /// Order entry: frequent pings with a short deadline, which also measure last_rtt_ns().
+    static WsSessionOptions order_entry() {
+        return {.ping_interval_ns = 5'000'000'000, .pong_timeout_ns = 3'000'000'000};
+    }
 };
 
 /// WebSocket client (RFC 6455) over any Stream: WsSession<TcpSocket> is ws://, WsSession<TlsStream>
@@ -121,6 +142,9 @@ public:
     void add_header(std::string_view name, std::string_view value) {
         extra_headers_.append(name).append(": ").append(value).append("\r\n");
     }
+    /// Asked for the address before every automatic reconnect (e.g. Resolver::rotating()), so a
+    /// venue's DNS changes are followed; an invalid Endpoint keeps the previous one.
+    void set_endpoint_provider(EndpointProvider p) { endpoint_provider_ = std::move(p); }
     [[nodiscard]] Transport& transport() noexcept { return transport_; }
 
     // ---------------------------------------------------------------- control
@@ -184,6 +208,8 @@ public:
     [[nodiscard]] std::size_t pending_frames() const noexcept { return pending_count_; }
     /// HTTP status of the last upgrade response (101 when accepted, 0 if none was received).
     [[nodiscard]] int last_upgrade_status() const noexcept { return last_upgrade_status_; }
+    /// Round trip of the last answered ping (0 until one is answered).
+    [[nodiscard]] int64_t last_rtt_ns() const noexcept { return last_rtt_ns_; }
     /// Failed connection attempts since the backoff was last reset.
     [[nodiscard]] uint32_t reconnect_attempts() const noexcept { return backoff_.attempts(); }
 
@@ -257,6 +283,7 @@ private:
     WsMaskKeyGen mask_gen_;
     int64_t opened_at_ns_{0};
     int64_t ping_sent_ns_{0};
+    int64_t last_rtt_ns_{0};
     bool awaiting_pong_{false};
 
     TimerId connect_timer_{};
@@ -266,6 +293,7 @@ private:
 
     MessageHandler on_message_;
     StateHandler on_state_;
+    EndpointProvider endpoint_provider_;
 
     // ---------------------------------------------------------------- connection lifecycle
 
@@ -374,12 +402,23 @@ private:
                     teardown(true, true);
                     return false;
                 }
-            } else if (enqueue_frame(WsOpcode::Ping, {}) == SendStatus::Ok) {
+            } else if (send_ping() == SendStatus::Ok) {
                 awaiting_pong_ = true;
                 ping_sent_ns_ = now;
             }
         }
         return state_ == State::Open;
+    }
+
+    SendStatus send_ping() {
+        if (opts_.ping_text.empty()) return enqueue_frame(WsOpcode::Ping, {});
+        return enqueue_frame(WsOpcode::Text, {reinterpret_cast<const uint8_t*>(opts_.ping_text.data()), opts_.ping_text.size()});
+    }
+
+    void on_pong() {
+        if (!awaiting_pong_) return;
+        awaiting_pong_ = false;
+        last_rtt_ns_ = recv_ns_ - ping_sent_ns_;
     }
 
     /// Closes the connection. `reconnect`: schedule an automatic reconnect (unless closed by the
@@ -392,6 +431,7 @@ private:
         }
         transport_.close();
         write_armed_ = false;
+        if (pending_count_ > 0) QUARK_LOG_WARN("ws {}: {} queued frames dropped", host_, pending_count_);
         while (pending_count_ > 0) {
             send_pool_.release(pending_[pending_head_].buf);
             pending_head_ = (pending_head_ + 1) % kMaxPendingFrames;
@@ -419,7 +459,11 @@ private:
                        backoff_.attempts());
         reconnect_timer_ = loop_.timers().add_task("ws_reconnect", [this] {
             reconnect_timer_ = kInvalidTimerId;
-            if (state_ == State::Disconnected && !user_closed_) start_connect();
+            if (state_ != State::Disconnected || user_closed_) return false;
+            if (endpoint_provider_) {
+                if (const Endpoint e = endpoint_provider_(); e.valid()) ep_ = e;
+            }
+            start_connect();
             return false;
         }, loop_.now_ns() + delay);
     }
@@ -560,7 +604,7 @@ private:
                 (void)enqueue_frame(WsOpcode::Pong, payload);
                 break;
             case WsOpcode::Pong:
-                awaiting_pong_ = false;
+                if (opts_.ping_text.empty()) on_pong();
                 break;
             case WsOpcode::Close:
                 if (state_ == State::Open) (void)enqueue_frame(WsOpcode::Close, payload.first(payload.size() >= 2 ? 2 : 0));
@@ -587,6 +631,15 @@ private:
     }
 
     void deliver(WsOpcode op, std::span<const uint8_t> payload, std::size_t capacity) {
+        if (!opts_.ping_text.empty()) {
+            const std::string_view text{reinterpret_cast<const char*>(payload.data()), payload.size()};
+            if (opts_.pong_text.empty()) {
+                on_pong();
+            } else if (op == WsOpcode::Text && text == opts_.pong_text) {
+                on_pong();
+                return;
+            }
+        }
         if (on_message_) on_message_(Message{op, payload, capacity, recv_ns_});
     }
 
@@ -617,8 +670,9 @@ private:
         slot.buf = std::move(b);
         slot.sent = 0;
         ++pending_count_;
+        const uint32_t gen = conn_gen_;
         flush_pending();
-        return SendStatus::Ok;
+        return gen == conn_gen_ ? SendStatus::Ok : SendStatus::Dropped;
     }
 
     /// Writes queued frames until the transport answers -EAGAIN (only that guarantees another

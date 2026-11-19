@@ -1,4 +1,5 @@
 #include "quark/net/HttpCodec.h"
+#include "quark/net/Url.h"  // both define helpers in net::detail
 #include "gtest/gtest.h"
 
 #include <string>
@@ -50,6 +51,21 @@ TEST_F(TestHttpCodec, ContentLength) {
     EXPECT_TRUE(e.complete);
     EXPECT_EQ(e.status, 204);
     EXPECT_TRUE(e.body.empty());
+}
+
+TEST_F(TestHttpCodec, HeaderLookup) {
+    auto b = buf("HTTP/1.1 429 Too Many Requests\r\nx-mbx-used-weight-1m:  2401 \r\nRetry-After: 7\r\n"
+                 "Content-Length: 0\r\n\r\n");
+    const auto r = parse_http_response(b);
+    ASSERT_TRUE(r.complete);
+    EXPECT_EQ(r.header("X-MBX-USED-WEIGHT-1M"), "2401");
+    EXPECT_EQ(r.header("retry-after"), "7");
+    EXPECT_EQ(r.header("Content-Length"), "0");
+    EXPECT_EQ(r.header("Retry"), "");
+    EXPECT_EQ(r.header("X-Missing"), "");
+
+    auto none = buf("HTTP/1.1 204 No Content\r\n\r\n");
+    EXPECT_EQ(parse_http_response(none).header("Content-Length"), "");
 }
 
 TEST_F(TestHttpCodec, ChunkedDecodedInPlace) {

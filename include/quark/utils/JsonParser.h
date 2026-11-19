@@ -3,6 +3,12 @@
 #include "quark/Attributes.h"
 #include "quark/QuarkError.h"
 
+// simdjson defines a few header functions SIMDJSON_CONSTEXPR_STRING, which it leaves empty without a
+// constexpr std::string (libstdc++ < 12): two translation units including it then fail to link.
+#include <string>
+#if !defined(SIMDJSON_CONSTEXPR_STRING) && !(defined(__cpp_lib_constexpr_string) && __cpp_lib_constexpr_string >= 201907L)
+    #define SIMDJSON_CONSTEXPR_STRING inline
+#endif
 #include "simdjson.h"
 #include <cstddef>
 #include <string>

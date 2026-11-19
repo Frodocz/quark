@@ -455,3 +455,7 @@ TEST(JsonParser, TestParseGeneral) {
 }
 
 } // namespace
+
+int quark_json_parser_second_tu();
+
+TEST(JsonParser, UsableFromSeveralTranslationUnits) { EXPECT_EQ(quark_json_parser_second_tu(), 1); }

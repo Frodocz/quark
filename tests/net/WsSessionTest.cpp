@@ -459,6 +459,91 @@ TEST_P(TestWsSession, CloseWithFramesStuckBehindASlowPeer) {
     });
 }
 
+TEST_P(TestWsSession, ApplicationPingAnsweredBySwallowedPong) {
+    TestServer server(
+        [&](ServerConn& c, TestServer& s) {
+            c.accept_websocket();
+            c.send_frame(WsOpcode::Text, "hello");
+            while (!s.stopping()) {
+                auto f = c.read_frame();
+                if (!f) return;
+                if (f->opcode == WsOpcode::Text && f->payload == "ping") c.send_frame(WsOpcode::Text, "pong");
+            }
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        WsSessionOptions opts{.ping_interval_ns = 20'000'000, .pong_timeout_ns = 200'000'000,
+                              .ping_text = "ping", .pong_text = "pong"};
+        Client<T> client(busy(), opts);
+        client.ws->connect(server.endpoint());
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.ws->last_rtt_ns() > 0; }));
+        run_for(client.loop, 100ms);
+        EXPECT_EQ(client.messages, std::vector<std::string>{"hello"});  // the pongs were swallowed
+        EXPECT_EQ(client.opened, 1);
+    });
+}
+
+TEST_P(TestWsSession, UnansweredApplicationPingReconnects) {
+    TestServer server(
+        [&](ServerConn& c, TestServer& s) {
+            c.accept_websocket();
+            while (!s.stopping() && c.read_frame()) {
+            }
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        WsSessionOptions opts{.reconnect_initial_ns = 20'000'000, .ping_interval_ns = 20'000'000,
+                              .pong_timeout_ns = 50'000'000, .ping_text = "ping", .pong_text = "pong"};
+        Client<T> client(busy(), opts);
+        client.ws->connect(server.endpoint());
+        EXPECT_TRUE(run_until(client.loop, [&] { return server.accepted() >= 2; }, 2000ms));
+    });
+}
+
+TEST_P(TestWsSession, SendOnAResetConnectionReportsDropped) {
+    std::atomic<bool> open{false};
+    std::atomic<bool> reset{false};
+    TestServer server(
+        [&](ServerConn& c, TestServer&) {
+            c.accept_websocket();
+            while (!open) std::this_thread::sleep_for(1ms);  // a reset discards what the client hasn't read
+            const linger abort_on_close{1, 0};  // close() sends RST
+            ::setsockopt(c.fd(), SOL_SOCKET, SO_LINGER, &abort_on_close, sizeof(abort_on_close));
+            reset = true;
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        open = reset = false;
+        Client<T> client(busy(), {.auto_reconnect = false});
+        client.ws->connect(server.endpoint());
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.ws->is_open(); }));
+        open = true;
+        while (!reset) std::this_thread::sleep_for(1ms);
+        std::this_thread::sleep_for(50ms);  // the RST arrives while the loop isn't stepped
+        auto status = client.ws->send_text("order");
+        if (status == WsSendStatus::Ok) status = client.ws->send_text("order");  // the first write may still pass
+        EXPECT_EQ(status, WsSendStatus::Dropped);
+        EXPECT_EQ(client.ws->state(), WsState::Disconnected);
+    });
+}
+
+TEST_P(TestWsSession, EndpointProviderChoosesTheReconnectAddress) {
+    TestServer first([](ServerConn& c, TestServer&) { c.accept_websocket(); }, server_opts());  // then drops it
+    TestServer second(
+        [](ServerConn& c, TestServer& s) {
+            c.accept_websocket();
+            s.hold();
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client(busy(), fast_reconnect());
+        const Endpoint next = second.endpoint();
+        client.ws->set_endpoint_provider([next] { return next; });
+        client.ws->connect(first.endpoint());
+        EXPECT_TRUE(run_until(client.loop, [&] { return second.accepted() >= 1 && client.ws->is_open(); }));
+    });
+}
+
 INSTANTIATE_TEST_SUITE_P(Transports, TestWsSession,
                          ::testing::Values(Params{false, true}, Params{false, false}, Params{true, true},
                                            Params{true, false}),

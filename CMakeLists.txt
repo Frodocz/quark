@@ -345,6 +345,7 @@ set(HEADER_FILES
         include/quark/crypto/HmacSha256.h
 
         include/quark/math/DoubleOps.h
+        include/quark/math/Int128.h
         include/quark/math/MathOps.h
         include/quark/math/ScaleInt.h
 
@@ -358,6 +359,7 @@ set(HEADER_FILES
         include/quark/net/HttpCodec.h
         include/quark/net/IOBuffer.h
         include/quark/net/Poller.h
+        include/quark/net/Resolver.h
         include/quark/net/Stream.h
         include/quark/net/SysApi.h
         include/quark/net/TcpSocket.h
@@ -374,11 +376,13 @@ set(HEADER_FILES
         include/quark/utils/FullDuplexShm.h
         include/quark/utils/HwEndian.h
         include/quark/utils/InplaceFunction.h
+        include/quark/utils/Journal.h
         include/quark/utils/JsonParser.h
         include/quark/utils/LatencyHistogram.h
         include/quark/utils/MemoryArena.h
         include/quark/utils/MMapFile.h
         include/quark/utils/RdtscClock.h
+        include/quark/utils/ShmDirectory.h
         include/quark/utils/SimpleObjectPool.h
         include/quark/utils/System.h
         include/quark/utils/TimerQueue.h
@@ -402,6 +406,7 @@ set(SOURCE_FILES
         src/TlsBackend.h
 
         src/net/Endpoint.cpp
+        src/net/Resolver.cpp
         src/net/TlsContext.cpp
         src/net/TlsInternal.h
         src/net/TlsStream.cpp

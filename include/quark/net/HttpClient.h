@@ -78,6 +78,9 @@ public:
     void on_error(ErrorHandler h) { on_error_ = std::move(h); }
     /// Host header value (and SNI / certificate checks over TLS).
     void set_host(std::string_view host) { host_.assign(host); }
+    /// Asked for the address before every automatic reconnect (e.g. Resolver::rotating()); an
+    /// invalid Endpoint keeps the previous one.
+    void set_endpoint_provider(EndpointProvider p) { endpoint_provider_ = std::move(p); }
     [[nodiscard]] Transport& transport() noexcept { return transport_; }
 
     QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void connect(const Endpoint& ep) {
@@ -175,6 +178,7 @@ private:
     TimerId reconnect_timer_{};
     ResponseHandler on_response_;
     ErrorHandler on_error_;
+    EndpointProvider endpoint_provider_;
 
     QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void start_connect() {
         if ((!send_ && !(send_ = pool_.acquire())) || (!recv_ && !(recv_ = pool_.acquire()))) {
@@ -203,6 +207,13 @@ private:
                 return false;
             }, loop_.now_ns() + opts_.connect_timeout_ns);
         }
+    }
+
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void reconnect() {
+        if (endpoint_provider_) {
+            if (const Endpoint e = endpoint_provider_(); e.valid()) ep_ = e;
+        }
+        start_connect();
     }
 
     void flush_send() {
@@ -278,7 +289,7 @@ private:
         if (on_response_) on_response_(r);  // r.body stays valid: recv_ is kept until the next request
         if (gen != conn_gen_) return;      // closed or reconnected in the callback
         if (!r.keep_alive) {
-            if (opts_.auto_reconnect && !user_closed_) start_connect();
+            if (opts_.auto_reconnect && !user_closed_) reconnect();
         } else if (state_ == State::Idle) {
             recv_.reset();
         }
@@ -323,7 +334,7 @@ private:
         const int64_t delay = backoff_.next_delay_ns();
         reconnect_timer_ = loop_.timers().add_task("http_reconnect", [this] {
             reconnect_timer_ = kInvalidTimerId;
-            if (state_ == State::Disconnected && !user_closed_) start_connect();
+            if (state_ == State::Disconnected && !user_closed_) reconnect();
             return false;
         }, loop_.now_ns() + delay);
     }

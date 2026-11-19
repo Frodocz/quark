@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quark/Attributes.h"
+#include "quark/utils/InplaceFunction.h"
 
 #include <netinet/in.h>
 
@@ -53,6 +54,9 @@ struct QUARK_API Endpoint {
 
     friend bool operator==(const Endpoint&, const Endpoint&) = default;
 };
+
+/// Chooses the address of the next connection attempt (e.g. Resolver::rotating()).
+using EndpointProvider = InplaceFunction<Endpoint(), 64>;
 
 } // namespace net
 
