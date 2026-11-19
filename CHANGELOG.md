@@ -36,6 +36,8 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
   and replay; `crc32c()`.
 - `quark/utils/Crc32c.hC`: `crc32c()` with x86 SSE4.2 (checked at run time), ARMv8 CRC instructions
   when the target has them, and a portable table otherwise; every variant gives the same result.
+- `enum_index()` in `QuarkEnum.h`: an enumerator's position in `enum_values()`, for per-enumerator tables built
+  at compile time.
 
 ## [1.1.0]
 

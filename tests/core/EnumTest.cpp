@@ -59,3 +59,11 @@ TEST(QuarkEnum, DefaultRangeLimit) {
     EXPECT_EQ(enum_name(Wide::Small), "Small");
     EXPECT_EQ(enum_name(Wide::Large), "");
 }
+
+TEST(QuarkEnum, Index) {
+    static_assert(quark::enum_index(Side::Buy) == 1u);
+    EXPECT_EQ(quark::enum_index(ErrorCode::MaxPosition), quark::enum_count_v<ErrorCode> - 1);
+    EXPECT_EQ(quark::enum_index(static_cast<Side>(9)), std::nullopt);
+    // the index addresses enum_values()
+    EXPECT_EQ(quark::enum_values<ErrorCode>()[*quark::enum_index(ErrorCode::InvalidSid)], ErrorCode::InvalidSid);
+}

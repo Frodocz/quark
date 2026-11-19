@@ -52,6 +52,13 @@ template <Enum E>
     return magic_enum::enum_cast<E>(value);
 }
 
+/// Position of `value` in enum_values<E>(), nullopt if it names no enumerator, A constexpr lookup:
+/// indexes per-enumerator tables built at compile time.
+template <Enum E>
+[[nodiscard]] constexpr std::optional<std::size_t> enum_index(E value) noexcept {
+    return magic_enum::enum_index(value);
+}
+
 /// Number of enumerators of E
 template <Enum E>
 inline constexpr std::size_t enum_count_v = magic_enum::enum_count<E>();
