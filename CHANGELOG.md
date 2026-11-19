@@ -34,6 +34,8 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
   file locks.
 - `Journal`: append-only, memory-mapped record log with CRC-32C, sequence numbers, torn-tail recovery
   and replay; `crc32c()`.
+- `quark/utils/Crc32c.hC`: `crc32c()` with x86 SSE4.2 (checked at run time), ARMv8 CRC instructions
+  when the target has them, and a portable table otherwise; every variant gives the same result.
 
 ## [1.1.0]
 
