@@ -372,6 +372,7 @@ set(HEADER_FILES
 
         include/quark/utils/CircularBuffer.h
         include/quark/utils/CommandQueue.h
+        include/quark/utils/Crc32c.h
         include/quark/utils/DateTime.h
         include/quark/utils/FullDuplexShm.h
         include/quark/utils/HwEndian.h

@@ -3,6 +3,7 @@
 #include "quark/Attributes.h"
 #include "quark/QuarkError.h"
 #include "quark/QuarkFormat.h"
+#include "quark/utils/Crc32c.h"
 #include "quark/utils/MMapFile.h"
 
 #include <atomic>
@@ -13,23 +14,9 @@
 #include <span>
 #include <string>
 
-#include <nmmintrin.h>
 #include <sys/mman.h>
 
 QUARK_BEGIN_NAMESPACE
-
-/// CRC-32C (Castagnoli) with the SSE4.2 instruction.
-__attribute__((target("sse4.2"))) inline uint32_t crc32c(const void* data, std::size_t n, uint32_t crc = 0) noexcept {
-    auto p = static_cast<const uint8_t*>(data);
-    uint64_t c = ~crc;
-    for (; n >= 8; n -= 8, p += 8) {
-        uint64_t v;
-        std::memcpy(&v, p, 8);
-        c = _mm_crc32_u64(c, v);
-    }
-    for (; n > 0; --n, ++p) c = _mm_crc32_u8(static_cast<uint32_t>(c), *p);
-    return ~static_cast<uint32_t>(c);
-}
 
 /// Append-only record log in a preallocated, memory-mapped file: an append is a memcpy, no syscall.
 ///

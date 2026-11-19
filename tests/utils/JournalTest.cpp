@@ -40,6 +40,22 @@ TEST(TestCrc32c, KnownValue) {
     EXPECT_EQ(crc32c("", 0), 0u);
 }
 
+TEST(TestCrc32c, EveryImplementationAgrees) {
+    std::vector<uint8_t> data(1031);
+    for (std::size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i * 131 + 7);
+    for (std::size_t n : {0u, 1u, 7u, 8u, 9u, 64u, 1031u}) {
+        const uint32_t sw = ~detail::crc32c_software(data.data(), n, ~0u);
+        EXPECT_EQ(crc32c(data.data(), n), sw) << n;
+#if defined(QUARK_CRC32C_X86)
+        if (detail::has_sse42()) {
+            EXPECT_EQ(~detail::crc32c_sse42(data.data(), n, ~0u), sw) << n;
+        }
+#endif
+    }
+    // continuing from a previous CRC equals one pass over the whole buffer
+    EXPECT_EQ(crc32c(data.data() + 100, 931, crc32c(data.data(), 100)), crc32c(data.data(), 1031));
+}
+
 TEST_F(TestJournal, AppendsAndReplaysInOrder) {
     {
         Journal j = open();

@@ -3,11 +3,13 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using namespace quark;
@@ -98,17 +100,23 @@ TEST(TestShmLayout, MatchesTheLegacyQueueLayout) {
     EXPECT_EQ(write_idx, 1u);                // one block used
     EXPECT_EQ(read_idx, 0u);
 
-    // the same bytes plus a message written the legacy way (block 1, write_idx 2) pop in order
+    // the same bytes plus a message written the legacy way (block 1, write_idx 2) pop in order,
+    // from a real queue object (trivially copyable: it may take the bytes)
     using Queue = SPSCVarQueue<kBytes>;
-    alignas(Queue) static unsigned char mem[sizeof(Queue)];
-    std::memcpy(mem, raw.data(), sizeof(mem));
+    static_assert(std::is_trivially_copyable_v<Queue>);
+    auto q = std::make_unique<Queue>();
+    auto* bytes = reinterpret_cast<unsigned char*>(q.get());
+    std::memcpy(bytes, raw.data(), sizeof(Queue));
     const uint16_t legacy_size = 8 + 3;
-    std::memcpy(mem + 64, &legacy_size, 2);
-    std::memcpy(mem + 64 + 8, "old", 3);
+    std::memcpy(bytes + 64, &legacy_size, 2);
+    std::memcpy(bytes + 64 + 8, "old", 3);
     write_idx = 2;
-    std::memcpy(mem + kBytes, &write_idx, 4);
+    std::memcpy(bytes + kBytes, &write_idx, 4);
+    // The queue's asm barriers declare write_idx and the blocks as overwritten ("=m"), so an
+    // optimizer drops these stores as dead: the real writer is another process. A compiler
+    // barrier keeps them, like that process's writes.
+    std::atomic_signal_fence(std::memory_order_seq_cst);
     std::vector<std::string> got;
-    auto* q = reinterpret_cast<Queue*>(mem);
     while (q->tryPop([&](Queue::MsgHeader* h) { got.emplace_back(reinterpret_cast<const char*>(h + 1), h->size - 8); })) {
     }
     EXPECT_EQ(got, (std::vector<std::string>{"hello", "old"}));
