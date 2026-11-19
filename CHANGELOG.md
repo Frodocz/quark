@@ -4,6 +4,37 @@ All notable changes to quark are listed here. quark follows [semantic versioning
 the major version changes with incompatible API or ABI changes, so `find_package(quark 1.0)` accepts
 any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
+## [1.2.0]
+
+### Added
+
+- `ScaleInt<SCALE, Rep>` / `TickSize<SCALE, Rep>`: the raw value can be an `int128_t` (`Rep = int128_t`,
+  SCALE 1..18) for values beyond int64's ~19 significant digits, e.g. crypto prices from 1e-13 to 1e9.
+  `Rep` defaults to `int64_t`: existing code is unchanged.
+- `ScaleInt::from_chars` / `ScaleInt::parse`: exact decimal text to `ScaleInt` (sign, fraction, exponent),
+  without going through double. Text needing more than SCALE fraction digits or not fitting is rejected
+  (`errc::result_out_of_range`), never rounded or wrapped.
+- `mul()` / `div()`: exact `ScaleInt` x `ScaleInt` and `ScaleInt` / `ScaleInt` at a chosen output scale,
+  rounded once with a `Rounding` mode (`HalfAway`, `Floor`, `Ceil`, `TowardZero`); false on overflow or
+  division by zero.
+- `ScaleInt::try_rescale()`: checked conversion across scales and representations; `TickSize::try_from_value()`,
+  `TickSize::value()`.
+- `quark/math/Int128.h`: `int128_t`, `uint128_t`, the `Integer` / `SignedInteger` concepts (std's concepts
+  reject `__int128` in strict ISO mode), `make_unsigned_t`, `to_chars(uint128_t)`. The `MathOps.h` integer
+  helpers accept the 128-bit types.
+- `WsSendStatus::Dropped`: `send()` reports a frame lost because the connection failed while it was
+  being written (it returned `Ok` before). Frames still queued at a teardown are logged.
+- `WsSessionOptions::ping_text` / `pong_text`: application-level pings (e.g. Bitget's `"ping"`), with the
+  reply swallowed; `WsSession::last_rtt_ns()`; liveness presets `WsSessionOptions::market_data()`,
+  `push_stream()`, `order_entry()`.
+- `net::Resolver`: keeps hosts' addresses fresh on its own thread; `EndpointProvider` and
+  `set_endpoint_provider()` on `WsSession` / `HttpClient` choose the address of every automatic reconnect.
+- `HttpResponseView::headers` and `header(name)` (case-insensitive), e.g. rate-limit headers.
+- `ShmDirectory`: discovers the running clients of `FullDuplexShm` sessions in a directory by their
+  file locks.
+- `Journal`: append-only, memory-mapped record log with CRC-32C, sequence numbers, torn-tail recovery
+  and replay; `crc32c()`.
+
 ## [1.1.0]
 
 ### Added
