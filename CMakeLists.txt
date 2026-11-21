@@ -367,6 +367,7 @@ set(HEADER_FILES
         include/quark/net/TlsStream.h
         include/quark/net/Url.h
         include/quark/net/WsFrame.h
+        include/quark/net/WsGroup.h
         include/quark/net/WsHandshake.h
         include/quark/net/WsSession.h
 
@@ -380,12 +381,15 @@ set(HEADER_FILES
         include/quark/utils/Journal.h
         include/quark/utils/JsonParser.h
         include/quark/utils/LatencyHistogram.h
+        include/quark/utils/LatencyRecorder.h
         include/quark/utils/MemoryArena.h
         include/quark/utils/MMapFile.h
+        include/quark/utils/RateLimiter.h
         include/quark/utils/RdtscClock.h
         include/quark/utils/ShmDirectory.h
         include/quark/utils/SimpleObjectPool.h
         include/quark/utils/System.h
+        include/quark/utils/TimeScopedDedup.h
         include/quark/utils/TimerQueue.h
 
         # third party header-only libs

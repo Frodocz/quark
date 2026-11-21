@@ -34,8 +34,15 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
   file locks.
 - `Journal`: append-only, memory-mapped record log with CRC-32C, sequence numbers, torn-tail recovery
   and replay; `crc32c()`.
-- `quark/utils/Crc32c.hC`: `crc32c()` with x86 SSE4.2 (checked at run time), ARMv8 CRC instructions
+- `quark/utils/Crc32c.h`: `crc32c()` with x86 SSE4.2 (checked at run time), ARMv8 CRC instructions
   when the target has them, and a portable table otherwise; every variant gives the same result.
+- `TimeScopedDedup`: first-seen detection of 64-bit keys within a time window, fixed capacity.
+- `WsGroup`: N WebSocket sessions to one host over different addresses: first-arrival dedup with per-session
+  delay and rotation of the slowest session (market data), or `send_best()` on the lowest-RTT session
+  (order entry).
+- `LatencyRecorder`: named latency stages over `LatencyHistogram`, logged as percentiles by `report()`.
+- `SlidingWindowLimiter` (`quark/utils/RateLimiter.h`): at most N units per sliding window, time passed in,
+  resynced to an exchange's reported usage.
 - `enum_index()` in `QuarkEnum.h`: an enumerator's position in `enum_values()`, for per-enumerator tables built
   at compile time.
 
@@ -58,8 +65,7 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Deprecated
 
-- The global `Version` constant: use `quark::kVersion`. A global name collides with any other library's or
-  program's `Version`; the global stays, `[[deprecated]]`, until 2.0.
+- The global `Version` constant: use `quark::kVersion`.
 
 ### Fixed
 
