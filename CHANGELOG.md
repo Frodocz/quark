@@ -40,11 +40,26 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 - `WsGroup`: N WebSocket sessions to one host over different addresses: first-arrival dedup with per-session
   delay and rotation of the slowest session (market data), or `send_best()` on the lowest-RTT session
   (order entry).
+- `HttpPool`: N keep-alive `HttpClient`s to one host over its addresses, sharing a bounded FIFO of requests
+  (each goes to the first idle client; waiting requests time out), so one slow response doesn't hold up the
+  others.
+- `TcpListener`: accepts connections on the `EventLoop` as connected `TcpSocket`s (`TcpSocket::adopt()`);
+  kernel sockets and F-Stack.
+- `QuarkConfigTable`: tables inside arrays (`[[venue]]`) are values too — `cfg["venue"][0]["name"]`,
+  `QuarkConfigValue::size()`, `QuarkConfig::array_size()`; dot paths index arrays (`"venue[1].name"`).
+- Rate-limited logging: `QLOG_{DEBUG,INFO,WARN,ERROR}_LIMIT(interval, logger, ...)`,
+  `QUARK_LOG_{WARN,ERROR}_LIMIT(interval, ...)` (quill's `_LIMIT` macros, suppressed counts included).
 - `LatencyRecorder`: named latency stages over `LatencyHistogram`, logged as percentiles by `report()`.
 - `SlidingWindowLimiter` (`quark/utils/RateLimiter.h`): at most N units per sliding window, time passed in,
   resynced to an exchange's reported usage.
 - `enum_index()` in `QuarkEnum.h`: an enumerator's position in `enum_values()`, for per-enumerator tables built
   at compile time.
+
+### Changed
+
+- `EventLoop::step()` returns whether it did work (input read, events dispatched, timers fired), so idle
+  steps can be spent on housekeeping; `EventLoop::note_work()` lets Pollables and step hooks report work.
+  Callers that ignore the result are unchanged.
 
 ## [1.1.0]
 

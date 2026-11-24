@@ -515,6 +515,7 @@ private:
             }
             const sys::io_result n = transport_.read(space);
             if (n == -EAGAIN) return;
+            loop_.note_work();
             if (n <= 0) {
                 if (n == 0) {
                     QUARK_LOG_INFO("ws {}: connection closed by peer", host_);

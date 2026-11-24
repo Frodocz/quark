@@ -122,6 +122,32 @@ QUARK_ALWAYS_INLINE io_result send(int fd, const void* buf, std::size_t len, boo
     return n >= 0 ? static_cast<io_result>(n) : -errno;
 }
 
+QUARK_ALWAYS_INLINE int listen_tcp(const sockaddr_in& sa, int backlog) noexcept {
+    const int fd = tcp_socket();
+    if (fd < 0) return fd;
+    int rc = set_int_option(fd, SOL_SOCKET, SO_REUSEADDR, 1);
+    if (rc == 0 && ::ff_bind(fd, reinterpret_cast<const linux_sockaddr*>(&sa), sizeof(sa)) != 0) rc = -errno;
+    if (rc == 0 && ::ff_listen(fd, backlog) != 0) rc = -errno;
+    if (rc != 0) ::ff_close(fd);
+    return rc == 0 ? fd : rc;
+}
+
+QUARK_ALWAYS_INLINE int accept(int fd, sockaddr_in& peer) noexcept {
+    socklen_t len = sizeof(peer);
+    const int c = ::ff_accept(fd, reinterpret_cast<linux_sockaddr*>(&peer), &len);
+    if (c < 0) return -errno;
+    if (const int rc = set_nonblock(c); rc != 0) {
+        ::ff_close(c);
+        return rc;
+    }
+    return c;
+}
+
+QUARK_ALWAYS_INLINE int local_address(int fd, sockaddr_in& sa) noexcept {
+    socklen_t len = sizeof(sa);
+    return ::ff_getsockname(fd, reinterpret_cast<linux_sockaddr*>(&sa), &len) == 0 ? 0 : -errno;
+}
+
 #else
 
 /// Nonblocking, close-on-exec IPv4 TCP socket. Returns the fd or -errno.
@@ -201,6 +227,30 @@ QUARK_ALWAYS_INLINE io_result recv(int fd, void* buf, std::size_t len) noexcept 
 QUARK_ALWAYS_INLINE io_result send(int fd, const void* buf, std::size_t len, bool more) noexcept {
     const ssize_t n = ::send(fd, buf, len, MSG_DONTWAIT | MSG_NOSIGNAL | (more ? MSG_MORE : 0));
     return n >= 0 ? static_cast<io_result>(n) : -errno;
+}
+
+/// A nonblocking socket listening on `sa` (SO_REUSEADDR). Returns the fd or -errno.
+QUARK_ALWAYS_INLINE int listen_tcp(const sockaddr_in& sa, int backlog) noexcept {
+    const int fd = tcp_socket();
+    if (fd < 0) return fd;
+    int rc = set_int_option(fd, SOL_SOCKET, SO_REUSEADDR, 1);
+    if (rc == 0 && ::bind(fd, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)) != 0) rc = -errno;
+    if (rc == 0 && ::listen(fd, backlog) != 0) rc = -errno;
+    if (rc != 0) ::close(fd);
+    return rc == 0 ? fd : rc;
+}
+
+/// The next pending connection as a nonblocking, close-on-exec fd, or -errno (-EAGAIN: none).
+QUARK_ALWAYS_INLINE int accept(int fd, sockaddr_in& peer) noexcept {
+    socklen_t len = sizeof(peer);
+    const int c = ::accept4(fd, reinterpret_cast<sockaddr*>(&peer), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    return c >= 0 ? c : -errno;
+}
+
+/// The address a socket is bound to (getsockname). Returns 0 or -errno.
+QUARK_ALWAYS_INLINE int local_address(int fd, sockaddr_in& sa) noexcept {
+    socklen_t len = sizeof(sa);
+    return ::getsockname(fd, reinterpret_cast<sockaddr*>(&sa), &len) == 0 ? 0 : -errno;
 }
 
 #endif

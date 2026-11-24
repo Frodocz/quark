@@ -119,8 +119,14 @@ public:
 
     void set_step_hook(StepHook hook) { step_hook_ = std::move(hook); }
 
-    QUARK_ATTRIBUTE_HOT void step() {
+    /// Tells the current step() it did work (e.g. a Pollable read bytes, a step hook drained a queue).
+    QUARK_ALWAYS_INLINE void note_work() noexcept { worked_ = true; }
+
+    /// Returns whether the step did any work: input read (note_work()), events dispatched
+    /// (Poller mode) or timers fired. Idle steps can be spent on housekeeping.
+    QUARK_ATTRIBUTE_HOT bool step() {
         now_ns_ = RdtscClock::tscns();
+        worked_ = false;
         if (step_hook_) step_hook_();
         if (cfg_.busy_poll) {
             for (std::size_t i = 0; i < pollables_.size(); ++i) {  // may grow while iterating
@@ -142,6 +148,7 @@ public:
             for (dispatch_idx_ = 0; dispatch_idx_ < dispatch_count_; ++dispatch_idx_) {
                 if (auto* p = static_cast<Pollable*>(events_[dispatch_idx_].token)) p->on_ready(events_[dispatch_idx_].flags);
             }
+            worked_ |= dispatch_count_ > 0;
             dispatch_idx_ = -1;
             dispatch_count_ = 0;
         }
@@ -149,7 +156,8 @@ public:
             std::erase(pollables_, nullptr);
             removed_ = false;
         }
-        timers_.poll(now_ns_);  // busy-poll: at most one step late, saves a clock read per step
+        worked_ |= timers_.poll(now_ns_) > 0;  // busy-poll: at most one step late, saves a clock read per step
+        return worked_;
     }
 
     /// Calls step() until stop().
@@ -198,6 +206,7 @@ private:
     ReadyEvent events_[Poller::kMaxEvents];
     int dispatch_idx_{-1};
     int dispatch_count_{0};
+    bool worked_{false};
     TimerQueue timers_;
     StepHook step_hook_;
     int64_t now_ns_{0};

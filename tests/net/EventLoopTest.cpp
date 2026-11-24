@@ -54,6 +54,22 @@ TEST_P(TestEventLoop, StepHookAndTimers) {
     EXPECT_GE(loop.now_ns() - start, 1'000'000);
 }
 
+TEST(TestEventLoopBusyPoll, StepReportsWhetherItDidWork) {
+    EventLoop loop({.busy_poll = true});
+    PipePollable p;
+    ASSERT_TRUE(loop.add(p, false));
+    EXPECT_FALSE(loop.step());  // polled, but it read nothing
+    p.on_call = [&] { loop.note_work(); };
+    EXPECT_TRUE(loop.step());
+    p.on_call = nullptr;
+    bool fired = false;
+    loop.timers().add_task("t", [&] { return fired = true, false; }, loop.now_ns());
+    EXPECT_TRUE(loop.step());
+    EXPECT_TRUE(fired);
+    EXPECT_FALSE(loop.step());
+    loop.remove(p);
+}
+
 TEST_P(TestEventLoop, RemoveFromInsideADispatchedCallback) {
     EventLoop loop({.busy_poll = GetParam()});
     PipePollable a, b;

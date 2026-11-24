@@ -357,11 +357,13 @@ set(HEADER_FILES
         include/quark/net/FStack.h
         include/quark/net/HttpClient.h
         include/quark/net/HttpCodec.h
+        include/quark/net/HttpPool.h
         include/quark/net/IOBuffer.h
         include/quark/net/Poller.h
         include/quark/net/Resolver.h
         include/quark/net/Stream.h
         include/quark/net/SysApi.h
+        include/quark/net/TcpListener.h
         include/quark/net/TcpSocket.h
         include/quark/net/TlsContext.h
         include/quark/net/TlsStream.h

@@ -7,7 +7,10 @@
 
 #include "QuarkTest.h"
 
+#include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <regex>
 #include <string>
 #include <vector>
@@ -46,6 +49,32 @@ TEST(ConfigLogTest, TypedLookups) {
     EXPECT_FALSE(cfg->get<int64_t>("a.s").has_value());  // wrong type
 }
 
+TEST(ConfigLogTest, ArraysOfTables) {
+    auto cfg = QuarkConfig::load_string(R"(
+[[venue]]
+name = "a"
+ports = [1, 2]
+[venue.limits]
+rate = 10
+
+[[venue]]
+name = "b"
+)");
+    ASSERT_TRUE(cfg.has_value());
+    EXPECT_EQ(cfg->array_size("venue"), 2u);
+    EXPECT_EQ(cfg->get<std::string>("venue[1].name"), "b");
+    EXPECT_EQ(cfg->get<int64_t>("venue[0].limits.rate"), 10);
+    const QuarkConfigValue first = (*cfg)["venue"][0];
+    EXPECT_TRUE(first.is<QuarkConfigTable>());
+    EXPECT_EQ(first.size(), 3u);
+    EXPECT_EQ(first["name"].get<std::string>(), "a");
+    EXPECT_EQ(first["ports"][1].get<int64_t>(), 2);
+    EXPECT_EQ(first["limits"]["rate"].get<int64_t>(), 10);
+    EXPECT_FALSE(first["missing"].has_value());
+    EXPECT_FALSE((*cfg)["venue"][2].has_value());
+    EXPECT_EQ(cfg->array_size("venue[0].name"), 0u);  // not an array
+}
+
 TEST(ConfigLogTest, BadLevelIsAQuarkErrorNamingTheKey) {
     auto cfg = QuarkConfig::load_string("[log.net]\nlevel = \"verbose\"\n");
     ASSERT_TRUE(cfg.has_value());
@@ -71,12 +100,17 @@ TEST(ConfigLogTest, FailedInitCanBeRetried) {
     ASSERT_NE(net, nullptr);
     QUARK_LOG_INFO("logging works after a failed init_log()");
     QLOG_INFO(net, "net logs to its file");
+    for (int i = 0; i < 10; ++i) QLOG_WARN_LIMIT(std::chrono::seconds(10), net, "throttled {}", i);
     shutdown_log();
     // the file name carries the process start time: net.log -> net_YYYYMMDD_HHMMSS.log
     std::vector<std::string> files;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) files.push_back(entry.path().filename().string());
     ASSERT_EQ(files.size(), 1u);
     EXPECT_TRUE(std::regex_match(files[0], std::regex{R"(net_\d{8}_\d{6}\.log)"})) << files[0];
-    EXPECT_GT(std::filesystem::file_size(dir / files[0]), 0u);
+    std::ifstream in(dir / files[0]);
+    const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    EXPECT_NE(text.find("net logs to its file"), std::string::npos) << text;
+    EXPECT_NE(text.find("throttled 0"), std::string::npos) << text;
+    EXPECT_EQ(text.find("throttled 1"), std::string::npos) << text;  // within the interval: suppressed
     std::filesystem::remove_all(dir);
 }

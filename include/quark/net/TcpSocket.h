@@ -37,6 +37,15 @@ public:
         return *this;
     }
 
+    /// Takes over a connected socket, e.g. from TcpListener (TCP_NODELAY is set on it).
+    [[nodiscard]] static TcpSocket adopt(int fd) noexcept {
+        TcpSocket s;
+        s.fd_ = fd;
+        s.state_ = State::Connected;
+        sys::set_nodelay(fd, true);
+        return s;
+    }
+
     /// Source address for the next connect() (network byte order), 0 for the kernel's choice.
     /// E.g. to spread connections over several local IPs against per-IP rate limits.
     void set_local_ip(uint32_t ip_be) noexcept { local_ip_be_ = ip_be; }

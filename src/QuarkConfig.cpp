@@ -31,6 +31,14 @@ struct QuarkConfig::QuarkConfigImpl {
             }
             return QuarkConfigValue{ BasicQuarkConfigValue{ std::move(vec) } };
         }
+        if (auto tbl = node.as_table()) {
+            QuarkConfigTable members;
+            members.reserve(tbl->size());
+            for (auto&& [key, elem] : *tbl) {
+                members.emplace_back(std::string{key.str()}, convert_node(elem));
+            }
+            return QuarkConfigValue{ BasicQuarkConfigValue{ std::move(members) } };
+        }
         return QuarkConfigValue{};
     }
 

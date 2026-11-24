@@ -191,15 +191,28 @@ QUARK_END_NAMESPACE
 #define QLOG_WARN(logger, fmt_str, ...)  QUILL_LOG_WARNING(logger, fmt_str, ##__VA_ARGS__)
 #define QLOG_ERROR(logger, fmt_str, ...) QUILL_LOG_ERROR(logger, fmt_str, ##__VA_ARGS__)
 
+// At most one record per `min_interval` (a std::chrono duration) per call site and thread; the next
+// record carries how many were suppressed. For errors that can repeat at the spin rate.
+#define QLOG_DEBUG_LIMIT(min_interval, logger, fmt_str, ...) QUILL_LOG_DEBUG_LIMIT(min_interval, logger, fmt_str, ##__VA_ARGS__)
+#define QLOG_INFO_LIMIT(min_interval, logger, fmt_str, ...)  QUILL_LOG_INFO_LIMIT(min_interval, logger, fmt_str, ##__VA_ARGS__)
+#define QLOG_WARN_LIMIT(min_interval, logger, fmt_str, ...)  QUILL_LOG_WARNING_LIMIT(min_interval, logger, fmt_str, ##__VA_ARGS__)
+#define QLOG_ERROR_LIMIT(min_interval, logger, fmt_str, ...) QUILL_LOG_ERROR_LIMIT(min_interval, logger, fmt_str, ##__VA_ARGS__)
+
 // quark's own records, to the "quark" logger. Usable from headers.
 #if defined(QUARK_DISABLE_INTERNAL_LOG)
     #define QUARK_LOG_DEBUG(fmt_str, ...) (void)0
     #define QUARK_LOG_INFO(fmt_str, ...)  (void)0
     #define QUARK_LOG_WARN(fmt_str, ...)  (void)0
     #define QUARK_LOG_ERROR(fmt_str, ...) (void)0
+    #define QUARK_LOG_WARN_LIMIT(min_interval, fmt_str, ...)  (void)0
+    #define QUARK_LOG_ERROR_LIMIT(min_interval, fmt_str, ...) (void)0
 #else
     #define QUARK_LOG_DEBUG(fmt_str, ...) QUILL_LOG_DEBUG(::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
     #define QUARK_LOG_INFO(fmt_str, ...)  QUILL_LOG_INFO(::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
     #define QUARK_LOG_WARN(fmt_str, ...)  QUILL_LOG_WARNING(::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
     #define QUARK_LOG_ERROR(fmt_str, ...) QUILL_LOG_ERROR(::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
+    #define QUARK_LOG_WARN_LIMIT(min_interval, fmt_str, ...) \
+        QUILL_LOG_WARNING_LIMIT(min_interval, ::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
+    #define QUARK_LOG_ERROR_LIMIT(min_interval, fmt_str, ...) \
+        QUILL_LOG_ERROR_LIMIT(min_interval, ::quark::detail::quark_logger(), fmt_str, ##__VA_ARGS__)
 #endif
