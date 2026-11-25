@@ -6,7 +6,34 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **(breaking)** `ShmDirectory::alive()` returns `std::optional<std::vector<std::string>>`: `nullopt` when the
+  scan fails (no fd left, a permission error), instead of an empty list that callers took for "every client
+  exited". A missing directory is still an empty list. `is_alive()` is replaced by `liveness()`, which returns
+  `Liveness::{Dead, Alive, Unknown}` (`Unknown`: the probe failed).
+- **(breaking)** `FullDuplexShm` accepts only files on tmpfs or hugetlbfs (e.g. under
+  `FullDuplexShm::kDefaultDir`, `/dev/shm`): on a disk filesystem every queue page page-faulted on its next
+  write after each writeback (~every 30 s). Other locations are refused.
+- **(breaking)** `MMapFile` with `create == false` no longer resizes an existing file whose size differs from
+  `Options::size`: it fails. `FullDuplexShm` therefore refuses a peer's files of another queue size instead of
+  shrinking them under the peer, which then died of SIGBUS.
+
+### Added
+
+- `FullDuplexShm::try_open()`: opens without throwing (also with `QUARK_NO_EXCEPTIONS`), the reason in an
+  optional `std::string*`; for servers opening their clients' files at run time.
+- `FullDuplexShm::dropped_on_open()`: the stale messages dropped from the read queue at open (by design).
+- `MMapFile::try_initialize()`: the non-throwing form of `initialize()`. Errors now carry their reason.
+- `Journal::prefault()` and `Journal::Options::prefault_bytes` (default 4 MiB): the pages ahead of the tail are
+  write-faulted (`MADV_POPULATE_WRITE`, Linux 5.14+) by the constructor, `sync()` and `prefault()`, so appends
+  no longer page-fault once per 4 KiB page (the file being mlock'ed didn't prevent it). `sync()` now flushes
+  only the records.
+
 ### Fixed
+
+- `Journal::append()` accepted an empty payload, which is the journal's end marker: replay stopped there,
+  and the next reopen overwrote every later record. Empty appends are now refused.
 
 - Clang builds failed to link the TLS code (undefined `quark::net::detail::openssl_error_string()` and
   `on_new_tls_session()`): two internal headers declared `namespace quark::net::detail` /

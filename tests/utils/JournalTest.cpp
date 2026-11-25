@@ -2,10 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstring>
 #include <filesystem>
+#include <sys/resource.h>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -100,6 +103,68 @@ TEST_F(TestJournal, TornRecordIsDroppedAndOverwritten) {
     j.append(bytes("3"));
     using R = std::vector<std::pair<uint64_t, std::string>>;
     EXPECT_EQ(records(), (R{{1, "one"}, {2, "two"}, {3, "3"}}));
+}
+
+// A record of size 0 is the end-of-journal marker: an empty append must be refused, or it would
+// hide every later record from replay (and the next reopen would overwrite them).
+TEST_F(TestJournal, EmptyAppendIsRefused) {
+    {
+        Journal j = open();
+        EXPECT_TRUE(j.append(bytes("one")));
+        EXPECT_FALSE(j.append(bytes("")));
+        EXPECT_FALSE(j.append(0, [](uint8_t*) {}));
+        EXPECT_EQ(j.last_seq(), 1u);
+        EXPECT_TRUE(j.append(bytes("two")));
+    }
+    using R = std::vector<std::pair<uint64_t, std::string>>;
+    EXPECT_EQ(records(), (R{{1, "one"}, {2, "two"}}));
+    Journal again = open();
+    EXPECT_EQ(again.last_seq(), 2u);
+}
+
+namespace {
+long thread_minor_faults() {
+    rusage u{};
+    ::getrusage(RUSAGE_THREAD, &u);
+    return u.ru_minflt;
+}
+}  // namespace
+
+// A file-backed shared mapping is write-protected until each page's first write, also when mlock'ed,
+// and again after it is written back: without prefaulting, every 4 KiB of appends took a page fault
+// (~3 us, sometimes ms) on the appending thread.
+TEST_F(TestJournal, AppendsWithinThePrefaultWindowDoNotFault) {
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || QUARK_HAS_FEATURE(address_sanitizer) || \
+    QUARK_HAS_FEATURE(thread_sanitizer)
+    GTEST_SKIP() << "sanitizers fault their shadow memory in on first access: no fault count to check";
+#endif
+    Journal j({.path = path, .capacity = 8u << 20, .lock = true, .prefault_bytes = 2u << 20});
+    if (!j.prefault()) GTEST_SKIP() << "kernel without MADV_POPULATE_WRITE (Linux < 5.14)";
+    const std::string rec(100, 'x');
+    long faults = thread_minor_faults();
+    for (int i = 0; i < 10'000; ++i) ASSERT_TRUE(j.append(bytes(rec)));  // ~1.1 MiB, ~280 pages
+    EXPECT_LE(thread_minor_faults() - faults, 2);
+
+    // sync() writes the records back, which write-protects their pages again, then prefaults from the tail on
+    j.sync();
+    faults = thread_minor_faults();
+    for (int i = 0; i < 10'000; ++i) ASSERT_TRUE(j.append(bytes(rec)));
+    EXPECT_LE(thread_minor_faults() - faults, 2);
+    EXPECT_EQ(records().size(), 20'000u);
+}
+
+// The tradeserver appends on its loop thread while a housekeeping thread calls sync()
+TEST_F(TestJournal, SyncRunsConcurrentlyWithAppends) {
+    Journal j({.path = path, .capacity = 4u << 20, .lock = false, .prefault_bytes = 256u << 10});
+    std::atomic<bool> done{false};
+    std::thread syncer([&] {
+        while (!done.load(std::memory_order_acquire)) j.sync();
+    });
+    const std::string rec(40, 'y');
+    for (int i = 0; i < 50'000; ++i) ASSERT_TRUE(j.append(bytes(rec)));
+    done.store(true, std::memory_order_release);
+    syncer.join();
+    EXPECT_EQ(records().size(), 50'000u);
 }
 
 TEST_F(TestJournal, FullJournalRefusesAppends) {

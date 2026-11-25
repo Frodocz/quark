@@ -34,13 +34,23 @@ void MMapFile::initialize(const Options& options) {
 }
 
 void MMapFile::initialize(const Options& options, bool& truncated) {
-    if (!initialize_impl(options, truncated)) {
-        reset();  // closes the file and unmaps whatever the failed attempt left behind
-        QUARK_THROW(QuarkError{fmtlib::format("mmap failed, {}", options.to_string())});
+    std::string why;
+    if (!try_initialize(options, truncated, &why)) {
+        QUARK_THROW(QuarkError{fmtlib::format("mmap failed: {}, {}", why, options.to_string())});
     }
 }
 
-bool MMapFile::initialize_impl(const Options& options, bool& truncated) {
+bool MMapFile::try_initialize(const Options& options, bool& truncated, std::string* error) {
+    std::string why;
+    if (!initialize_impl(options, truncated, why)) {
+        reset();  // closes the file and unmaps whatever the failed attempt left behind
+        if (error != nullptr) *error = std::move(why);
+        return false;
+    }
+    return true;
+}
+
+bool MMapFile::initialize_impl(const Options& options, bool& truncated, std::string& why) {
     QUARK_ASSERT(addr_ == nullptr, "MMapFile already initialized");
     int prot = PROT_READ;
     if (options.writable) {
@@ -52,7 +62,8 @@ bool MMapFile::initialize_impl(const Options& options, bool& truncated) {
         size_ = options.size;
         void* addr = mmap(nullptr, size_, prot, map_flags, -1, 0);
         if (addr == MAP_FAILED) {
-            QUARK_LOG_ERROR("Failed to mmap: {}", std::strerror(errno));
+            why = fmtlib::format("mmap: {}", std::strerror(errno));
+            QUARK_LOG_ERROR("Failed to {}", why);
             return false;
         }
         addr_ = static_cast<uint8_t*>(addr);
@@ -70,25 +81,36 @@ bool MMapFile::initialize_impl(const Options& options, bool& truncated) {
         }
         int fd = open(options.filename.c_str(), file_flags, options.mode);
         if (fd == -1) {
-            QUARK_LOG_ERROR("Failed to open file {}: {}", options.filename, std::strerror(errno));
+            why = fmtlib::format("open {}: {}", options.filename, std::strerror(errno));
+            QUARK_LOG_ERROR("Failed to {}", why);
             return false;
         }
         fd_ = fd;  // owned from here: reset() closes it if a later step fails
         struct stat st;
         if (fstat(fd, &st)) {
-            QUARK_LOG_ERROR("Failed to fstat {}: {}", options.filename, std::strerror(errno));
+            why = fmtlib::format("fstat {}: {}", options.filename, std::strerror(errno));
+            QUARK_LOG_ERROR("Failed to {}", why);
             return false;
         }
         if (options.writable && (st.st_mode & 0777) != options.mode) {
             if (fchmod(fd, options.mode) != 0) {
-                QUARK_LOG_ERROR("Failed to chmod {}: {}", options.filename, std::strerror(errno));
+                why = fmtlib::format("chmod {}: {}", options.filename, std::strerror(errno));
+                QUARK_LOG_ERROR("Failed to {}", why);
                 return false;
             }
         }
         if (options.writable && options.size != 0 && static_cast<int64_t>(options.size) != st.st_size) {
+            if (!options.create) {
+                // not ours to resize: the process that created it may have it mapped (a shrunk file
+                // raises SIGBUS there), and its layout differs from what we expect anyway
+                why = fmtlib::format("{} is {} bytes, expected {}", options.filename, st.st_size, options.size);
+                QUARK_LOG_ERROR("Refusing to map {}", why);
+                return false;
+            }
             size_ = options.size;
             if (ftruncate(fd, size_)) {
-                QUARK_LOG_ERROR("Failed to ftruncate {}: {}", options.filename, std::strerror(errno));
+                why = fmtlib::format("ftruncate {}: {}", options.filename, std::strerror(errno));
+                QUARK_LOG_ERROR("Failed to {}", why);
                 return false;
             }
             truncated = true;
@@ -98,12 +120,14 @@ bool MMapFile::initialize_impl(const Options& options, bool& truncated) {
         }
         void* addr = mmap(nullptr, size_, prot, map_flags, fd, 0);
         if (addr == MAP_FAILED) {
-            QUARK_LOG_ERROR("Failed to mmap {}: {}", options.filename, std::strerror(errno));
+            why = fmtlib::format("mmap {}: {}", options.filename, std::strerror(errno));
+            QUARK_LOG_ERROR("Failed to {}", why);
             return false;
         }
         addr_ = static_cast<uint8_t*>(addr);
         if (options.lock && mlock(addr_, size_)) {
-            QUARK_LOG_ERROR("Failed to mlock (size: {}): {}", size_, std::strerror(errno));
+            why = fmtlib::format("mlock {} bytes of {}: {}", size_, options.filename, std::strerror(errno));
+            QUARK_LOG_ERROR("Failed to {}", why);
             return false;
         }
     }

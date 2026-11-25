@@ -87,7 +87,9 @@ TEST(MMapFileTest, AnonymousMapping) {
 
 TEST(FullDuplexShmTest, RoundTripAndOversizeWrites) {
     using Shm = FullDuplexShm<4096>;
-    const std::string a_to_b = temp_path("a2b"), b_to_a = temp_path("b2a");
+    const std::string dir = quark::test::tmpfs_dir("mmap");  // FullDuplexShm accepts tmpfs only
+    if (dir.empty()) GTEST_SKIP() << "/dev/shm is not tmpfs";
+    const std::string a_to_b = dir + "/a2b", b_to_a = dir + "/b2a";
     std::filesystem::remove(a_to_b);
     std::filesystem::remove(b_to_a);
     {
@@ -114,6 +116,5 @@ TEST(FullDuplexShmTest, RoundTripAndOversizeWrites) {
         // a second writer on the same queue is refused (flock)
         QUARK_EXPECT_ERROR(Shm(b_to_a, a_to_b, true), "flock failed");
     }
-    std::filesystem::remove(a_to_b);
-    std::filesystem::remove(b_to_a);
+    std::filesystem::remove_all(dir);
 }

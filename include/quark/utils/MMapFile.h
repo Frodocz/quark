@@ -18,7 +18,8 @@ public:
         bool lock = true;     // use mlock to lock the address into the memory
         bool create = true;   // create if the file doesn't exist
         mode_t mode = 0644;   // access mode: owner rw-, group r--, others r--
-        std::size_t size = 0; // use a non-zero value to truncate the file
+        std::size_t size = 0; // non-zero: the file's size. A file being created (create) is truncated to it;
+                              // an existing one opened with create == false must have it already
     
         std::string to_string() const;
     };
@@ -32,8 +33,12 @@ public:
     MMapFile(MMapFile&& other) { this->operator=(std::move(other)); }
     MMapFile& operator=(MMapFile&& other); // close may throw
 
+    /// Throws QuarkError (fatal with QUARK_NO_EXCEPTIONS) on failure, with the reason.
     void initialize(const Options& options);
     void initialize(const Options& options, bool& truncated);
+    /// Same, but returns false on failure (the reason in `*error` if given) instead of throwing, also
+    /// with QUARK_NO_EXCEPTIONS: for files that come from another process at run time.
+    [[nodiscard]] bool try_initialize(const Options& options, bool& truncated, std::string* error = nullptr);
 
     uint8_t* addr() const noexcept { return addr_; }
     std::size_t size() const noexcept { return size_; }
@@ -41,7 +46,7 @@ public:
 
     void reset();
 private:
-    bool initialize_impl(const Options& options, bool& truncated);
+    bool initialize_impl(const Options& options, bool& truncated, std::string& why);
 
     uint8_t* addr_{nullptr};
     std::size_t size_{0};

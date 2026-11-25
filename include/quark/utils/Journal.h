@@ -6,6 +6,7 @@
 #include "quark/utils/Crc32c.h"
 #include "quark/utils/MMapFile.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +16,11 @@
 #include <string>
 
 #include <sys/mman.h>
+#include <unistd.h>
+
+#ifndef MADV_POPULATE_WRITE
+    #define MADV_POPULATE_WRITE 23  // Linux 5.14+; older kernel headers lack it
+#endif
 
 QUARK_BEGIN_NAMESPACE
 
@@ -27,6 +33,13 @@ QUARK_BEGIN_NAMESPACE
 ///
 /// A crashed process loses nothing (the page cache keeps the mapping); call sync() from a
 /// housekeeping thread to also survive a power loss. Everything else is single-threaded.
+///
+/// Page faults: the pages of a shared file mapping are write-protected until their first write, also
+/// when mlock'ed, and again each time they are written back (sync(), or the kernel's flusher). An
+/// append to such a page takes a fault (~3 us, sometimes ms). So the pages from the tail to
+/// `prefault_bytes` ahead are write-faulted by the constructor and again by every sync() or
+/// prefault(): call one of them from a housekeeping thread often enough that the appends between
+/// two calls fit in `prefault_bytes`.
 class Journal {
 public:
     struct Header {
@@ -39,7 +52,8 @@ public:
     struct Options {
         std::string path;
         std::size_t capacity{256u << 20};  ///< file size for a new journal
-        bool lock{true};                   ///< mlock the file: no page faults on the append path
+        bool lock{true};                   ///< mlock the file: its pages are never swapped out
+        std::size_t prefault_bytes{4u << 20};  ///< bytes ahead of the tail kept write-faulted, see prefault()
     };
 
     explicit Journal(const Options& options) {
@@ -57,17 +71,22 @@ public:
         tail_ = s.end;
         last_seq_ = s.last_seq;
         torn_bytes_ = nonzero_extent(file_.addr() + tail_, file_.size() - tail_);
+        prefault_bytes_ = options.prefault_bytes;
+        (void)prefault();
     }
 
-    /// Appends `payload`; false if the journal is full.
+    /// Appends `payload`; false if the journal is full or `payload` is empty.
     bool append(std::span<const uint8_t> payload) {
         return append(static_cast<uint32_t>(payload.size()),
                       [&](uint8_t* dst) { std::memcpy(dst, payload.data(), payload.size()); });
     }
 
-    /// Appends a `size`-byte record written in place by `fill(uint8_t* dst)`; false if it doesn't fit.
+    /// Appends a `size`-byte record written in place by `fill(uint8_t* dst)`; false if it doesn't fit
+    /// or `size` is 0 (a zero size marks the end of the journal: such a record would hide every later
+    /// one from replay).
     template <class Fill>
     bool append(uint32_t size, Fill&& fill) {
+        if (size == 0) [[unlikely]] return false;
         const std::size_t total = record_bytes(size);
         if (total > file_.size() - tail_) return false;
         uint8_t* rec = file_.addr() + tail_;
@@ -78,7 +97,8 @@ public:
         h->seq = seq;
         h->crc = record_crc(seq, payload, size);
         std::atomic_ref<uint32_t>(h->size).store(size, std::memory_order_release);
-        tail_ += total;
+        // read by sync()/prefault() on the housekeeping thread
+        std::atomic_ref<std::size_t>(tail_).store(tail_ + total, std::memory_order_relaxed);
         last_seq_ = seq;
         return true;
     }
@@ -90,8 +110,27 @@ public:
     /// write), rounded up to 8 bytes; 0 for a clean file.
     [[nodiscard]] std::size_t torn_bytes() const noexcept { return torn_bytes_; }
 
-    /// Flushes the file to disk. Safe from another thread.
-    void sync() const noexcept { ::msync(file_.addr(), file_.size(), MS_SYNC); }
+    /// Flushes the records to disk, then prefault()s the pages ahead of the tail again (writeback
+    /// write-protects the tail page). Safe from another thread. Only `[0, tail)` is written: the
+    /// prefaulted pages ahead hold no records, flushing them would only rewrite zeros.
+    void sync() const noexcept {
+        const std::size_t tail = load_tail();
+        if (tail > 0) ::msync(file_.addr(), round_up_to_page(tail), MS_SYNC);
+        (void)prefault();
+    }
+
+    /// Write-faults the pages from the tail's page to `prefault_bytes` ahead (MADV_POPULATE_WRITE:
+    /// the kernel does it without touching the bytes, so it is safe while append() writes there).
+    /// Safe from another thread. False if the kernel doesn't support it (Linux < 5.14): appends then
+    /// take a page fault per page.
+    bool prefault() const noexcept {
+        const std::size_t tail = load_tail();
+        const std::size_t begin = tail / page_size() * page_size();
+        // saturating: a huge prefault_bytes (e.g. SIZE_MAX for "the whole file") must not wrap
+        const std::size_t end = prefault_bytes_ >= file_.size() - tail ? file_.size() : tail + prefault_bytes_;
+        if (prefault_bytes_ == 0 || begin >= end) return true;
+        return ::madvise(file_.addr() + begin, end - begin, MADV_POPULATE_WRITE) == 0;
+    }
 
     /// Calls fn(seq, payload) for each valid record of the journal at `path`, in order. Returns the
     /// number of records. Works on a file another process is appending to.
@@ -104,7 +143,8 @@ public:
 
 private:
     MMapFile file_;
-    std::size_t tail_{0};
+    alignas(std::atomic_ref<std::size_t>::required_alignment) std::size_t tail_{0};
+    std::size_t prefault_bytes_{0};
     uint64_t last_seq_{0};
     std::size_t torn_bytes_{0};
 
@@ -121,6 +161,20 @@ private:
             if (w != 0) return i * 8;
         }
         return 0;
+    }
+
+    // the tail as published by append(), for the housekeeping thread (atomic_ref<const T> is C++26)
+    std::size_t load_tail() const noexcept {
+        return std::atomic_ref<std::size_t>(const_cast<std::size_t&>(tail_)).load(std::memory_order_relaxed);
+    }
+
+    static std::size_t page_size() noexcept {
+        static const std::size_t size = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+        return size;
+    }
+
+    std::size_t round_up_to_page(std::size_t n) const noexcept {
+        return std::min(file_.size(), (n + page_size() - 1) / page_size() * page_size());
     }
 
     static constexpr std::size_t record_bytes(std::size_t size) noexcept {
