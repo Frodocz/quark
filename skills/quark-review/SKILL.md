@@ -71,7 +71,12 @@ map in `context.md` is a starting assumption. Verify it, and report any mismatch
 component is affected (see the consumer map in `context.md`; confirm with
 `grep -rn "<Symbol>" /home/ubuntu/personal/trading --include=*.h --include=*.cpp -l | grep -v /build`).
 A defect in code that trading runs per message is more urgent than the same defect in unused code;
-unused code still gets reviewed, but its severity says "latent (no current consumer)".
+unused code still gets reviewed, but its severity says "latent (no current consumer)". Code the owner
+plans to adopt (ScaleInt for Price/Qty) is "latent-planned": rate it by the impact it will have once
+adopted, and say so.
+
+**Target.** The reference production target is the dev box (AMD EPYC 7R13 / Zen 3, see context.md), and
+trading builds with `-march=native` + LTO. Latency claims must say which build they come from.
 
 ## 4. How to work
 
@@ -108,11 +113,13 @@ unused code still gets reviewed, but its severity says "latent (no current consu
    Review coroutines/jthread/semaphore only if the code uses them.
 6. Vendored code in `include/quark/third_party/` (SPSC_Queue, inplace_function, tscns): review how it
    is integrated and any local modifications, not upstream line by line.
-7. Exception policy: start from `QuarkError.h` (summarised in context.md) and check the code is
-   consistent with it. Trading builds with exceptions **on** and catches `simdjson_error`, so changes
-   in what quark throws are API changes. Plain `assert()` disappears under `NDEBUG` (all Release
-   builds, trading included); checks that must survive in production need `QUARK_ASSERT` or
-   `QUARK_REQUIRE`.
+7. Exception policy: start from `QuarkError.h` and "Exception policy target" in context.md. Trading
+   builds with exceptions on today, but the target production mode is `QUARK_NO_EXCEPTIONS=ON`, where
+   every `QUARK_THROW` aborts. So a throw reachable from **runtime external input** (peer SHM files,
+   network data, exchange responses) is at least Major; throws at configuration or start-up are fine.
+   Changes in what quark throws are API changes for trading. Plain `assert()` disappears under
+   `NDEBUG` (all Release builds, trading included); checks that must survive in production need
+   `QUARK_ASSERT` or `QUARK_REQUIRE`.
 
 ## 5. Severity
 
@@ -143,7 +150,9 @@ reviews):
    each (math/time/net/containers/parsing/runtime/build).
 3. Run `build_matrix.sh rel asan tsan warn` and `coverage.sh`. Summarise the numbers only; don't judge them.
 4. List orphan files (not referenced by CMake/tests/examples), local modifications of vendored code
-   compared to upstream, and headers that are not self-contained.
+   compared to upstream (fetch upstream into a fresh `mktemp -d` directory and only `diff` it, never build
+   or run it), and headers that are not self-contained
+   (`${CLAUDE_SKILL_DIR}/scripts/header_selfcontained.sh`, after a `rel` build has fetched the dependencies).
 5. List at most 5 questions for the user (e.g. what counts as hot, target CPU and `-march`, whether
    the context.md map is right). Once they are answered, suggest updating `references/context.md`.
 

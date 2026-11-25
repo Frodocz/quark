@@ -16,7 +16,8 @@ in tradecommon; `pin_thread_to_cpu`, `install_shutdown_handler`/`shutdown_reques
 2. Log backend: it also drives `RdtscClock::calibrate()`, so what happens to tscns accuracy if the
    backend stalls or logging isn't initialised? Shutdown order (ScopedLog destruction vs threads
    still logging); flush on crash (`crash_handler`, `fatal_flush_timeout`); signal-safety of the
-   crash path; quill version pinning (static_assert in QuarkLog.cpp) and LL-005.
+   crash path; quill version pinning (static_assert in QuarkLog.cpp); whether raw quill APIs work on quark's loggers
+   (trading had to use `quark::Frontend::get_logger`, because `quill::Frontend::get_logger` aborts on them).
 3. Fatal path: `fatal_error()` re-entrancy, whether the user's handler can deadlock (it runs before
    the flush), stderr ordering, and `QUARK_NO_EXCEPTIONS` vs exceptions-on behaviour of the same call site.
 4. QuarkConfig (cold, but a bad config means a wrong trade): type coercion (int vs float vs string),

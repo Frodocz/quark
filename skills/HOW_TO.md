@@ -5,7 +5,7 @@ This folder holds two Claude Code skills, used as a standard operating procedure
 | Skill | What it does | Changes files? |
 |---|---|---|
 | `/quark-review <scope>` | A read-only review of one area of quark, weighted by how the trading modules (alphaframe, tradeserver, backtest, tradecommon) use it | No |
-| `/quark-fix <IDs> [report]` | Fixes the findings you confirmed: test first, one commit per finding, then re-verified, including a build of trading against the change | Yes (on a `fix/...` branch) |
+| `/quark-fix <IDs> [report]` | Fixes the findings you confirmed: test first, then re-verified, including a build of trading against the change. Left **uncommitted** for your approval | Yes (working tree, on a branch tracking `origin`) |
 
 ```
 skills/
@@ -19,7 +19,8 @@ skills/
 │   ├── scripts/
 │   │   ├── build_matrix.sh        ← multi-config build + test + warning/sanitizer summary
 │   │   ├── coverage.sh            ← line/branch coverage (gcovr or lcov)
-│   │   └── hotpath_symbols.sh     ← finds new/malloc/locks/throw/__divti3/... call sites in binaries
+│   │   ├── hotpath_symbols.sh     ← finds new/malloc/locks/throw/__divti3/... call sites in binaries
+│   │   └── header_selfcontained.sh ← every public header compiles alone (and when included twice)
 │   └── templates/
 │       ├── report.md              ← the report layout (finding IDs like NET-03)
 │       └── AllocGuard.h           ← test helper that asserts "zero allocations"
@@ -51,16 +52,16 @@ time, and a fix run commits.
 
 ### 1.2 Install the missing tools (optional but recommended)
 
-The dev box currently has GCC 11.4, cmake, ninja, objdump, strace and perf. Without the tools
-below, the review still works but reports those checks as "not run":
+Installed on the dev box (2026-11-25): GCC 11.4, **clang 14** (TSan with fewer false positives,
+libFuzzer), **gcovr 8.8**, cmake, ninja, objdump, strace, perf. Still missing, optional; without them
+the review reports those checks as "not run":
 
 ```bash
-pip install gcovr                                   # coverage.sh
-sudo apt install clang clang-tidy cppcheck lcov     # clang TSan (fewer false positives), static analysis, libFuzzer
-sudo apt install valgrind heaptrack ltrace          # optional: allocation tracing
+sudo apt install clang-tidy cppcheck lcov           # static analysis, lcov fallback
+sudo apt install valgrind heaptrack ltrace          # allocation tracing
 ```
 
-With GCC 11.4 only the fmt path of `QuarkFormat` is built; covering `std::format` needs GCC ≥ 13 or Clang ≥ 16.
+Both compilers build only the fmt path of `QuarkFormat`; covering `std::format` needs GCC ≥ 13 or Clang ≥ 16.
 
 ### 1.3 Allow the scripts without prompts (optional)
 
@@ -168,14 +169,15 @@ Read the report, decide, then:
 
 Or, in the same session as the review, just `/quark-fix NET-02 NET-05`. What `quark-fix` does:
 
-- creates a `fix/net-02-05` branch when you're on `main`;
+- `git fetch`es and works on a local branch **tracking the remote** (e.g. `fix/net-02-05` → `origin/main`), rebasing onto it if you pushed in the meantime;
 - per finding: a failing test (or a baseline benchmark), then the fix, then the test passes;
 - **stops and asks** before changing the public API, the SHM/Journal layout, rounding/overflow
   semantics, what throws vs returns an error, or CMake options;
 - re-verifies with `build_matrix.sh` (rel asan noexc, plus tsan / nologger openssl shared when relevant)
   and `hotpath_symbols.sh` for hot-path changes;
 - builds and tests **trading against the modified quark** (`-DQUARK_SOURCE_DIR=$PWD`); it never edits trading;
-- makes one commit per finding (message: ID, root cause, test, risk, rollback), and never pushes.
+- leaves the changes **uncommitted** and shows you the diff. After you approve, it commits one finding per
+  commit (message: ID, root cause, test, risk, rollback). It never pushes; you push.
 
 It ends with a fixed / not-fixed / new-findings / decisions-needed / trading-impact summary.
 
@@ -183,8 +185,8 @@ It ends with a fixed / not-fixed / new-findings / decisions-needed / trading-imp
 
 Both skills may propose "candidate lessons-learned entries". If one is a real, reusable pattern, tell
 Claude: *"add LL candidate 1 to lessons-learned.md"*. Every future review checks these patterns
-first. LL-001…LL-005 were seeded from git history (f6f28b1) and trading's
-`IMPLEMENTATION_SUMMARY.md`: **confirm or delete them**.
+first. The file starts empty. Past bugs from git history (f6f28b1) and trading's
+`IMPLEMENTATION_SUMMARY.md` are referred to inside the area checklists instead.
 
 ### Step 5: ongoing reviews of changes
 
@@ -214,6 +216,9 @@ JOBS=4 $S/build_matrix.sh asan           # limit parallelism
 
 $S/coverage.sh                           # build/review/cov/coverage.{lines,branches}.txt
 
+$S/header_selfcontained.sh                                        # g++, default macros (after a rel build)
+CXX=clang++ $S/header_selfcontained.sh build/review/rel -DQUARK_NO_EXCEPTIONS -fno-exceptions -march=native
+
 # after `build_matrix.sh rel` (which builds the benchmarks):
 $S/hotpath_symbols.sh build/review/rel/benchmarks/<bench binary> 'BM_|quark::'
 ```
@@ -223,7 +228,11 @@ Notes:
   (`QUARK_ENABLE_ASSERTIONS` doesn't do anything today; see `build-api.md`, item 1.)
 - `warn` adds `-Wconversion -Wshadow ...`. Test and benchmark targets build with `-Werror`, so new
   warnings show up there as errors. The summary counts warnings and `-Werror` errors in quark's
-  own code only (not in dependencies).
+  own code only (not in dependencies). quark's own objects are deleted first, so a re-run reports
+  every diagnostic again.
+- `tsan` uses clang++ when installed. Delete `build/review/tsan` once if it was first configured with GCC.
+- None of the configs use `-march=native` or LTO, which the trading production build will
+  (see `context.md`). Treat their latency numbers as "generic x86-64".
 - Within one run, sources fetched by the first config are reused by the others; only one config downloads.
 - Sanitizer tests run under `setarch -R` (ASLR off) to avoid GCC 11 sanitizer start-up failures on newer kernels.
 

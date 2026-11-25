@@ -27,8 +27,11 @@ Scripts are in `${CLAUDE_SKILL_DIR}/../quark-review/scripts/`. Run them from the
 1. **Scope.** Fix only the IDs the user picked and leave everything else alone. Record new issues you
    notice under "new findings" and don't fix them on the side. Why: changes that grow beyond their
    scope can't be reviewed or rolled back safely in a trading system.
-2. **Branch.** If on `main`, create `fix/<area>-<ids>` first (e.g. `fix/net-02-03`). Never push or
-   open a PR unless the user asks.
+2. **Branch and sync.** The user pushes to GitHub themselves, so the remote can be ahead of this
+   checkout. Before touching code: `git fetch origin`, then work on a local branch that **tracks the
+   remote** (e.g. `git switch -c fix/<area>-<ids> --track origin/main`, or the existing tracking branch), and
+   merge/rebase it onto `origin/<branch>` whenever the remote has moved. If uncommitted or untracked
+   files would be overwritten, back them up outside the repo first and say so. Never push or open a PR.
 3. **Test first.** One finding (or one tightly coupled group) at a time: write a test that fails and
    reproduces it, change the code, confirm the test passes. If no failing test is possible (pure
    performance work), write a benchmark first and record the baseline. Put tests next to the
@@ -58,7 +61,9 @@ Scripts are in `${CLAUDE_SKILL_DIR}/../quark-review/scripts/`. Run them from the
      `cmake -S /home/ubuntu/personal/trading -B build/review/trading -DQUARK_SOURCE_DIR=$PWD && cmake --build build/review/trading -j && ctest --test-dir build/review/trading --output-on-failure`.
      Trading builds with `-Werror`, so new warnings in quark headers break it. Never edit trading
      from this skill; report the breaks it needs.
-7. **One finding per commit.** The message covers: finding ID, root cause, the test that guards
+7. **No commits until the user approves.** Leave each fix uncommitted and show it (`git diff --stat`,
+   then the diff per finding). Only after the user approves, commit **one finding per commit**,
+   and re-sync with the remote first. The message covers: finding ID, root cause, the test that guards
    it, risk, and how to roll it back. Example:
    ```
    fix(net): NET-02 WsSession keeps a dangling view after reconnect
@@ -74,7 +79,7 @@ Scripts are in `${CLAUDE_SKILL_DIR}/../quark-review/scripts/`. Run them from the
 
 ## Final output
 
-- Fixed: ID, commit, test, verification results (configs run, before → after)
+- Fixed: ID, files changed (uncommitted, or commit once approved), test, verification results (configs run, before → after)
 - Not fixed, and why
 - New findings (not handled)
 - Decisions needed from the user

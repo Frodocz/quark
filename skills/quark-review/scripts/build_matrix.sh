@@ -15,11 +15,15 @@
 #   shared    BUILD_SHARED_LIBS=ON
 #   warn      extra warnings ($WARN_FLAGS). Test/bench targets build with -Werror, so new warnings
 #             there become errors: the build keeps going and the summary counts them separately.
+#             quark's own objects are deleted first so a re-run reports every diagnostic again.
 #
 # Environment:
 #   QUARK_ROOT        repo root (default: git root or the current directory)
 #   JOBS              parallel compile jobs (default: nproc)
 #   WARN_FLAGS        extra warning flags for the warn config
+#   CXX               C++ compiler for all configs except tsan (default: CMake's choice, i.e. c++)
+#   CC                C compiler; by default the one matching the C++ compiler (g++-11 -> gcc-11,
+#                     clang++ -> clang), because mixed GCC versions break coverage and LTO
 #   CXX_TSAN          compiler for tsan (default clang++, falls back to the default compiler with a note)
 #   CMAKE_ARGS_EXTRA  extra cmake arguments for every config (word-split)
 #   CTEST_TIMEOUT     per-test timeout in seconds (default 300)
@@ -57,6 +61,26 @@ if command -v setarch >/dev/null 2>&1; then SAN_RUN=(setarch "$(uname -m)" -R); 
 # Only count diagnostics in quark's own code, not in fetched dependencies.
 PROJECT_DIAG_RE="^($ROOT/)?(include|src|tests|benchmarks|examples)/"
 
+# The C compiler must match the C++ compiler: AWS-LC is C, and CMake adds the C compiler's library
+# dir (-L.../gcc/<ver>) to C++ links. With cc=gcc-12 and c++=g++-11 (as on the dev box), -lgcov/-lgcc then
+# come from GCC 12 (coverage silently records nothing) and LTO objects of two GCC versions can't be linked.
+# Prints a -DCMAKE_C_COMPILER=... argument for the given C++ compiler, or nothing if CC or
+# CMAKE_ARGS_EXTRA already chooses one.
+c_compiler_arg() {
+    local cxx="$1" c ver
+    [ -n "${CC:-}" ] && { echo "-DCMAKE_C_COMPILER=$CC"; return; }
+    [[ "${CMAKE_ARGS_EXTRA:-}" == *CMAKE_C_COMPILER* ]] && return
+    cxx=$(command -v "$cxx" 2>/dev/null) || return
+    if "$cxx" --version 2>/dev/null | grep -qi clang; then
+        c="${cxx%++}"                      # clang++ -> clang, clang++-14 -> clang-14 handled below
+        [ -x "$c" ] || c="${cxx/clang++/clang}"
+    else
+        ver=$("$cxx" -dumpversion 2>/dev/null | cut -d. -f1)
+        c=$(command -v "gcc-$ver" 2>/dev/null || true)
+    fi
+    [ -n "$c" ] && [ -x "$c" ] && echo "-DCMAKE_C_COMPILER=$c"
+}
+
 if [ "$#" -eq 0 ]; then set -- rel asan tsan warn; fi
 
 declare -a SUMMARY_NAMES=() SUMMARY_ROWS=() FETCH_REUSE=()
@@ -76,7 +100,7 @@ collect_fetched_sources() {
 run_config() {
     local name="$1"
     local -a args=()
-    local note="" san_cfg=0 werror_cfg=0
+    local note="" san_cfg=0 werror_cfg=0 cxx_used="${CXX:-c++}"
     local sanflags="-O2 -g"   # RelWithDebInfo without -DNDEBUG: assert() stays active
     case "$name" in
         rel)      args=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DQUARK_BUILD_BENCHMARKS=ON) ;;
@@ -85,7 +109,8 @@ run_config() {
         tsan)     args=(-DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$sanflags" -DQUARK_SANITIZE_THREAD=ON)
                   san_cfg=1
                   if command -v "$CXX_TSAN" >/dev/null 2>&1; then
-                      args+=("-DCMAKE_CXX_COMPILER=$CXX_TSAN")
+                      args+=("-DCMAKE_CXX_COMPILER=$(command -v "$CXX_TSAN")")
+                      cxx_used="$CXX_TSAN"
                   else
                       note="$CXX_TSAN not found, using the default compiler (GCC TSan may report false positives on atomic_thread_fence)"
                   fi ;;
@@ -98,6 +123,10 @@ run_config() {
         *) echo "unknown config: $name (choose from: rel asan tsan noexc nologger openssl shared warn)" >&2
            SUMMARY_NAMES+=("$name"); SUMMARY_ROWS+=("unknown|-|-|-|-"); overall=1; return ;;
     esac
+
+    local carg; carg=$(c_compiler_arg "$cxx_used")
+    [ -n "$carg" ] && args+=("$carg")
+    [ -n "${CXX:-}" ] && [ "$cxx_used" = "$CXX" ] && args+=("-DCMAKE_CXX_COMPILER=$(command -v "$CXX")")
 
     # shellcheck disable=SC2206
     local -a extra=(${CMAKE_ARGS_EXTRA:-})
@@ -118,7 +147,13 @@ run_config() {
 
     echo "==== [$name] build"
     local -a kg=()
-    [ "$werror_cfg" -eq 1 ] && kg=(-- "${KEEP_GOING[@]}")
+    if [ "$werror_cfg" -eq 1 ]; then
+        kg=(-- "${KEEP_GOING[@]}")
+        # An incremental build re-prints no warnings for objects that are up to date, so counts would
+        # drop to 0 on a re-run. Delete quark's own objects (not those of _deps/, e.g. AWS-LC) so every
+        # quark TU is compiled, and its diagnostics printed, again.
+        find "$bdir" -path "$bdir/_deps" -prune -o -name '*.o' -type f -print0 | xargs -0 -r rm -f
+    fi
     if ! cmake --build "$bdir" -j"$JOBS" "${kg[@]}" >"$build_log" 2>&1; then
         status_build="FAIL"; overall=1
     fi

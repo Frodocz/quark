@@ -9,6 +9,10 @@ Binance order/cancel/modify**, and `sign_base64` at Bitget login/REST. Ed25519Si
 and HwEndian aren't used by trading (latent). Crc32c is used through Journal.
 
 ## Checks
+0. Exceptions (see context.md, "Exception policy target"): which JsonParser/crypto entry points
+   throw or abort on malformed **network** input? Under the target `QUARK_NO_EXCEPTIONS=ON` they must
+   return errors instead; on the hot path they must never throw in either mode. Does JsonParser offer
+   (and document) an error-code path that trading's parsers could switch to?
 1. simdjson integration: the padded-buffer requirement (does `parse_in_place` own or need
    `SIMDJSON_PADDING` bytes after the message inside the WS receive buffer?); lifetime of
    document/value, and whether a string_view dangles; parser reuse and preallocation (zero
@@ -23,10 +27,11 @@ and HwEndian aren't used by trading (latent). Crc32c is used through Journal.
    expects? AWS-LC vs OpenSSL differences. HMAC is most of the 2 µs `Router::insert` cost, so
    per-call cycles matter (benchmarks/crypto/CryptoBench.cpp).
 3. Crc32c: do the hardware and software paths give the same result? Alignment and tail handling;
-   are ISA compile flags or runtime dispatch right (no SIGILL on CPUs without the instruction; see LL-001)?
+   are ISA compile flags or runtime dispatch right (no SIGILL on CPUs without the instruction). History: Journal's crc32c was SSE4.2-only behind
+   `__attribute__((target))` until f6f28b1. With trading on `-march=native` both paths exist: are both tested?
 4. HwEndian: aligned access, strict aliasing (should use memcpy/`std::bit_cast`), reads in non-native byte order.
 5. Url: parsing of host/port/path/query, IPv6 literals, and no generic helper names leaking into the
-   consumer namespace (LL-004).
+   consumer namespace (Url.h's `detail::iequals` once clashed with a new helper).
 
 ## Verification
 - Known-answer tests: HMAC-SHA256 (RFC 4231), Ed25519 (RFC 8032), Base64 (RFC 4648),

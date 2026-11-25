@@ -41,6 +41,13 @@ quark_add_test(quark_test_fatal core/FatalTest.cpp)
 quark_add_test(quark_test_enum core/EnumTest.cpp)
 quark_add_test(quark_test_version core/VersionTest.cpp)
 
+# every quark:: symbol of the library is inside the versioned inline namespace quark::v1
+if (CMAKE_NM)
+    add_test(NAME quark_test_symbols_versioned
+            COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DLIB=$<TARGET_FILE:quark>
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/core/CheckVersionedSymbols.cmake)
+endif ()
+
 # crypto
 quark_add_test(quark_test_encoding crypto/EncodingTest.cpp)
 quark_add_test(quark_test_crypto crypto/SignerTest.cpp)

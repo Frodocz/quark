@@ -16,9 +16,24 @@ CommandQueue, CircularBuffer, MemoryArena and standalone SPSCQueue aren't used b
    pairing that justifies its `memory_order`. Check full/empty detection and wrap-around;
    variable-length padding and messages that cross the end; leftover elements on destruction;
    construction/destruction of non-trivial `T`.
-   Note: CMake warns that TSan with non-Clang compilers can report false positives, and the dev box
-   has only GCC. Tell tool false positives (e.g. GCC TSan not understanding `atomic_thread_fence`)
-   apart from real races, and give the criterion you used.
+   Note: CMake warns that TSan with non-Clang compilers can report false positives. Use clang
+   (`build_matrix.sh tsan` picks clang++ 14 when installed). Tell tool false positives apart from
+   real races and give the criterion you used.
+   **SPSCVarQueue barriers (re-check every review that touches SHM).** `SPSCVarQueue.h:55-112`
+   (vendored, unmodified) uses plain non-atomic `write_idx`/`read_idx`/block headers with
+   `asm volatile("" : "=m"(x) ...)` / `("" : : "m"(x))` compiler barriers and **no `"memory"`
+   clobber**, relying on x86-TSO for ordering between CPUs. Questions:
+   (a) Does each barrier constrain every location it has to order (payload bytes written through
+   `blk` vs the publishing store to `write_idx`)? An `"m"` operand covers only the named object, so
+   other stores may move across it.
+   (b) Is it still correct under LTO and `-march=native` (the trading build), where more inlining
+   lets the compiler see through the call boundaries that hid reorderings before?
+   (c) What exactly does the cross-process claim cover? Trading's `IMPLEMENTATION_SUMMARY.md` says
+   "production is unaffected: the writer is another process". That's true for the compiler's view
+   of the *peer's* stores, not for ordering inside one process's own writes. History: `TestShmLayout` failed
+   only in Release because `"=m"` let GCC drop the test's own stores (fixed in the test, f6f28b1).
+   Evidence for (a)/(b): read the disassembly of `FullDuplexShm` write/read paths in an `-O3 -march=native -flto`
+   build, plus a two-process stress test (writer and reader on different cores, sequence-checked payloads).
 2. Shared memory and files: `static_assert(is_always_lock_free)` and `is_trivially_copyable`; stable
    layout (magic/version, no pointers, endianness); the 64 MiB + 256 B size check (`TestShmLayout`);
    recovery when the peer crashes or dies mid-write; flock liveness semantics (`LOCK_EX` by the

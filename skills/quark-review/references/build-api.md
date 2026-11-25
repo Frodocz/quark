@@ -43,4 +43,7 @@ a different compiler or standard library (GCC ≥ 13 or Clang ≥ 16).
 - Version consistency and ODR protection for types exposed PUBLIC (simdjson, quill, magic_enum).
 - What `QUARK_API` exports; the rule linking SOVERSION/`inline namespace v1` to ABI changes.
 - Whether inline functions in headers produce duplicate symbols in shared builds because of visibility settings.
-- Headers that leak generic names or macros into consumer code (LL-004).
+- Headers that leak generic names or macros into consumer code (e.g. helper names like `iequals`
+  clashing with trading's own helpers; keep them in `detail::` and test that headers include together).
+- `-march=native` + LTO in trading (owner 2026-11-25): build quark that way too (see context.md, "Production
+  target") and look for `-Wodr`/`-Wlto-type-mismatch` diagnostics and code that depends on ISA macros.

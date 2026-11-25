@@ -1,13 +1,14 @@
 # quark project context
 
 > `CMakeLists.txt` and `cmake/` are the source of truth; this file is a map for orientation.
-> Facts marked **(verified YYYY-MM-DD)** were checked against code on that date. Re-check anything a
-> finding depends on. Items marked **(assumption)** still need the owner's confirmation. Update
-> this file when triage or the user corrects it.
+> Facts marked **(verified YYYY-MM-DD)** were checked against code on that date; **(owner YYYY-MM-DD)**
+> marks a decision the owner stated. Re-check anything a finding depends on. Update this file when
+> triage or the user corrects it.
 
 ## Build and options (verified 2026-11-24)
-- C++20, `CMAKE_CXX_EXTENSIONS=OFF`, GCC/Clang, default build type Release (`-O3 -DNDEBUG`). No
-  `-march`, LTO or PGO is set by quark or by trading.
+- C++20, `CMAKE_CXX_EXTENSIONS=OFF`, GCC/Clang, default build type Release (`-O3 -DNDEBUG`). quark
+  sets no `-march`, LTO or PGO. Trading doesn't either *yet*, but it is to build with
+  `-march=native` + LTO (see "Production target").
 - Options: `QUARK_NO_EXCEPTIONS` (OFF), `QUARK_ENABLE_ASSERTIONS` (OFF), `QUARK_ENABLE_LOGGER` (ON),
   `QUARK_USE_FSTACK` (OFF), `QUARK_TLS_BACKEND` (AWS-LC default, or OpenSSL ≥ 3.0),
   `QUARK_LOG_HUGE_PAGES` (ON), `QUARK_LOG_QUEUE_TYPE` (BoundedDropping, so logs are dropped when the
@@ -31,13 +32,74 @@
 - Inline namespace `quark::v1`; the SOVERSION is the major version; visibility is hidden except for
   `QUARK_API`.
 
-## Toolchain on the dev box (verified 2026-11-24; re-check with `command -v`)
-- Present: GCC 11.4 (so `std::format` is off and quill's fmt is used), cmake, ctest, ninja, objdump,
-  strace, perf, python3.
-- Missing: clang/clang++ (so TSan falls back to GCC, which can report false positives on
-  `atomic_thread_fence`), clang-tidy, cppcheck, gcovr, lcov, ltrace, heaptrack, valgrind.
-  Install: `pip install gcovr`, `sudo apt install clang clang-tidy cppcheck lcov valgrind heaptrack`.
-- Existing build dirs use Unix Makefiles.
+## Production target (owner 2026-11-25: "use the dev machine as the target"; verified 2026-11-25)
+- Provisional: production hardware isn't decided, so **this dev box is the reference target**.
+  Re-measure if production moves.
+- AWS **m6a.2xlarge**, KVM guest, **AMD EPYC 7R13 (Zen 3; `-march=native` = `znver3`)**, 8 vCPUs =
+  4 cores × SMT2, 1 socket, 1 NUMA node; L1d 32 KiB/core, L2 512 KiB/core, L3 16 MiB shared.
+  Kernel 6.8.0-1069-aws.
+- TSC: `constant_tsc nonstop_tsc tsc_known_freq rdtscp`, clocksource `tsc`. The TSC is virtualised
+  by KVM, so treat calibration accuracy and drift as things to measure, not assume.
+- ISA available: SSE4.2 (CRC32C), AVX2, BMI2, AES-NI, VAES, VPCLMULQDQ, **SHA-NI** (SHA-256 for
+  HMAC). **No AVX-512.**
+- No isolated cores (`/sys/devices/system/cpu/isolated` is empty). The `doc/TUNING.md` settings
+  aren't applied, so benchmark tails here include scheduler and IRQ noise. Pin benchmarks to one
+  core and keep its SMT sibling idle.
+- **Trading build (owner 2026-11-25): `-march=native` + LTO.** Effects on reviews:
+  - Benchmark and hot-path numbers count only when built with `-march=native` and LTO (the
+    `build_matrix.sh rel` config has neither, so call such numbers "generic x86-64").
+  - With `-march=native`, ISA paths are chosen at compile time (`__SSE4_2__`, `__SHA__`, `__AVX2__`).
+    Check that both the native and the generic paths are tested and agree (CRC32C,
+    HMAC/SHA-256 in AWS-LC, simdjson kernels).
+  - LTO inlines across quark's `.cpp` files and trading, and exposes ODR violations (`-Wodr`, which
+    GCC reports only with LTO). Any `NDEBUG`- or macro-dependent inline body that differs between
+    TUs becomes a real risk.
+  - The binary isn't portable to another CPU: a production host that isn't Zen 3 or newer must be rebuilt.
+
+## Toolchain on the dev box (verified 2026-11-25; re-check with `command -v`)
+- Present: GCC 11.4 (so `std::format` is off and quill's fmt is used), **clang/clang++ 14.0**
+  (Ubuntu; TSan + libFuzzer runtimes; uses libstdc++ 11), **gcovr 8.8** (`~/.local/bin`), cmake,
+  ctest, ninja, objdump, strace, perf, python3.
+- Missing: clang-tidy, cppcheck, lcov, ltrace, heaptrack, valgrind
+  (`sudo apt install clang-tidy cppcheck lcov valgrind heaptrack ltrace`).
+- Clang 14 is below the Clang ≥ 16 `std::format` cut-off, so both compilers build only the fmt
+  path. Covering `std::format` needs GCC ≥ 13 or Clang ≥ 16.
+- The older build dirs (`build/`, `build-*`) use Unix Makefiles; `build/review/*` use Ninja.
+- **Mixed GCC versions by default (verified 2026-11-25).** `cc`/`gcc` → **gcc-12** (an alternative set
+  in 2026-06), while `c++`/`g++` → **g++-11**; clang 14 also selects GCC 12's libstdc++ headers. With
+  CMake's defaults, AWS-LC (C) builds with gcc-12, and C++ targets link with `-L/usr/lib/gcc/x86_64-linux-gnu/12`.
+  Consequences: coverage records nothing (libgcov 12 vs objects from GCC 11), and **LTO across the two
+  versions can't work** (GCC 11 can't read GCC 12 LTO bytecode), which matters for trading's planned
+  LTO build. The review scripts pin the matching C compiler (`gcc-11` for `g++-11`, `clang` for `clang++`).
+  Trading's own build has the same mix until the owner pins `CC`/`CXX`.
+- **quark's tests don't build with clang (verified 2026-11-25).** `cmake/QuarkUtils.cmake:61` adds
+  `-Wimplicit-int-float-conversion` for Clang to the `-Werror` test/bench/example targets, and vendored
+  `tscns.h` (included by `RdtscClock.h`, not a system header) triggers it 5 times. Trading's flags
+  don't enable that warning, so trading isn't affected. Workaround for clang runs:
+  `CMAKE_ARGS_EXTRA="-DCMAKE_CXX_FLAGS=-Wno-error=implicit-int-float-conversion"`.
+
+## Baseline from triage (verified 2026-11-24, quark cd6855c)
+- rel / asan / tsan(GCC): 504 / 508 / 505 tests, all passing, no sanitizer reports. The counts
+  differ because of `NDEBUG`-only and ASan-only tests, which is by design.
+- All 56 public headers are self-contained (`scripts/header_selfcontained.sh`).
+- Vendored SPSC_Queue, inplace_function and tscns (de26b45) are byte-identical to upstream.
+  `third_party/tscns/.git/` is a nested clone on disk only, not tracked.
+- Strict warnings (`warn`): 199 `-Werror` errors in quark code; 152 of them in vendored `tscns.h`.
+- Coverage (2026-11-25, gcovr, GCC 11 Debug, 505 tests): **85% lines (5953/6939), 57% branches
+  (4841/8418)** for include/quark + src, excluding third_party. Per-file: `build/review/cov/coverage.lines.txt`.
+- clang 14 TSan (2026-11-25): 395 of 400 tests built and ran, **0 TSan reports**. Not built:
+  - TLS-linked tests (tls_stream, ws_session, http_client, binance_ws example): the namespace link
+    bug in `src/net/TlsInternal.h` (below).
+  - timer_queue: `TimerQueueTest.cpp` replaces global `operator new`, which clashes with clang's TSan runtime.
+  - 1 failure: `TestScaleInt.TestToRawMatchesLlround` (FMA contraction, below).
+- Known clang-only defects (found in triage, not yet fixed or reviewed):
+  - `src/net/TlsInternal.h` / `src/crypto/OpenSslError.h` declare `namespace quark::net::detail` /
+    `quark::crypto::detail` without `QUARK_BEGIN_NAMESPACE`. GCC treats that as extending `quark::v1::…`
+    (C++20 inline-namespace rule); clang 14 creates a separate namespace, so the TLS code fails to link.
+  - `ScaleInt::to_raw` (`math/ScaleInt.h:219-223`, `v * SCALE + 0.49999999999999994`) gives
+    compiler/flag-dependent results: clang contracts it into an FMA (when constant-folding, and at runtime
+    with `-march=native`), e.g. `ScaleInt<13>(500.0000000000001)` gives raw …002 instead of …001. GCC
+    in ISO mode, the planned trading build, is unaffected.
 
 ## Modules
 - **math**: ScaleInt, Int128, DoubleOps, MathOps
@@ -73,9 +135,11 @@
 - **Cross-process ABI**: `FullDuplexShm<64 MiB>` over `SPSCVarQueue` must stay byte-compatible with
   the legacy binaries (file = 64 MiB + 256 B; see `TestShmLayout`). The `Journal` record format is
   persisted across restarts. Changing either is a breaking change.
-- Trading catches `simdjson::simdjson_error` around `JsonParser` in every per-message parser and
-  catches `std::exception` from `FullDuplexShm`/config construction. It is **not** compatible with
-  `QUARK_NO_EXCEPTIONS=ON` as written.
+- Trading today catches `simdjson::simdjson_error` around `JsonParser` in every per-message parser
+  (simdjson's throwing `.value()` style, e.g. `alphaframe/src/md/BinanceUsdm.cpp:47-63`) and catches
+  `std::exception` from `FullDuplexShm`/config construction (`tradeserver/src/TradeServer.cpp:221`,
+  opening a client's SHM session). It is **not** compatible with `QUARK_NO_EXCEPTIONS=ON` as written;
+  see "Exception policy target" for the planned move.
 - Exchanges: Binance USDⓈ-M (WS-API orders, HMAC per request) and Bitget UTA (HMAC only at login/REST).
 
 ### Consumer map (what trading runs, and where)
@@ -96,16 +160,17 @@
 | QuarkLog (`ScopedLog`, INFO/WARN/ERROR macros, `quark::Frontend`) | All binaries | producer side hot, backend cold |
 | QuarkConfig (`load_file`, `get_or`, `QuarkConfigArray`), QuarkEnum, System (`pin_thread_to_cpu`, shutdown handler) | All binaries | cold (enum_name may be hot when used in logs) |
 | DateTime (`Date`, `TradingDay`) | alphaframe `Strategy.h` | warm |
-| **Not used by trading:** ScaleInt and all of math, Ed25519Signer, Base64Encoding, HttpPool, TcpListener/TcpSocket (direct), F-Stack, CommandQueue, CircularBuffer, MemoryArena, HwEndian, standalone SPSCQueue | — | latent: review for correctness, mark severity "latent" |
+| **Planned (owner 2026-11-25), not used yet:** ScaleInt for Price/Qty | — | latent-planned: rate by the impact it will have once adopted, label "planned consumer" |
+| **Not used by trading:** the rest of math (except as ScaleInt dependencies), Ed25519Signer, Base64Encoding, HttpPool, TcpListener/TcpSocket (direct), F-Stack, CommandQueue, CircularBuffer, MemoryArena, HwEndian, standalone SPSCQueue | — | latent: review for correctness, mark severity "latent" |
 
 Refresh this map with:
 `grep -rhoE '#include [<"]quark/[^>"]+' /home/ubuntu/personal/trading --include=*.h --include=*.cpp --exclude-dir='build*' | sort | uniq -c | sort -rn`
 
-## Hot-path map (starting assumption; verify)
+## Hot-path map (confirmed by the owner 2026-11-25; still flag code that contradicts it)
 
 | Module / file | Class | Notes |
 |---|---|---|
-| math/* | hot (no consumer yet) | price/qty/accounting arithmetic once trading moves off `double` (assumption) |
+| math/* | hot (planned consumer) | price/qty arithmetic once trading moves Price/Qty to ScaleInt (owner 2026-11-25) |
 | RdtscClock, tscns | hot | `tscns()` goes through a function-local static (guard check per call); calibrated from the quill backend thread |
 | LatencyRecorder / LatencyHistogram | hot record path; reporting cold | |
 | SPSC queues, FullDuplexShm, CommandQueue, CircularBuffer | hot | |
@@ -134,8 +199,29 @@ Refresh this map with:
 - Users of `QUARK_THROW`: JsonParser, InplaceFunction, Journal, FullDuplexShm, MemoryArena,
   CircularBuffer, EventLoop, BufferPool, and the .cpp files for crypto, MMapFile, QuarkLog, DateTime, TlsContext.
 
+## Exception policy target (owner 2026-11-25)
+- Intent: run production with **`QUARK_NO_EXCEPTIONS=ON`**, working like `QUILL_NO_EXCEPTIONS`.
+  The mechanism already matches quill (`QUILL_TRY/THROW/CATCH` → `QUILL_REQUIRE` → abort;
+  `QUARK_THROW` → `fatal_error()` → handler, flush, abort). Reason given: lower latency.
+- Reviewer position (challenge raised 2026-11-25; the owner keeps the decision). Exceptions cost
+  nothing on the non-throwing path (table-based unwinding). The latency comes from **throwing**:
+  a throw costs µs and takes the unwinder's locks. Today that happens per malformed message
+  through simdjson's `.value()`, not through `QUARK_THROW`. So:
+  1. The latency win comes from parsing with error codes (`.get(x)` / `error_code`) on the hot path. That's
+     independent of the flag, and needs `-fno-exceptions` *in trading's TUs* (today the flag is
+     PRIVATE to quark's `.cpp` files) for simdjson to switch to `SIMDJSON_EXCEPTIONS=0`.
+  2. With the flag ON, every `QUARK_THROW` becomes an abort. Errors from **runtime external input**
+     must first get non-throwing APIs, e.g. a client's SHM file failing `flock`/size checks in
+     `FullDuplexShm` (today caught at `TradeServer.cpp:221`, under NO_EXCEPTIONS it would abort the
+     tradeserver with orders open), `MMapFile`, `Journal` open.
+  3. Measure before switching: the `rel` vs `noexc` benchmarks on the target.
+- Review rules that follow:
+  - A `QUARK_THROW`/`QUARK_REQUIRE` reachable from **runtime external input** (peer SHM files,
+    network data, exchange responses) is **Major**: it aborts in the target production mode.
+  - Configuration and start-up throws are fine (an abort at start-up is the intended behaviour).
+  - Hot-path code must not throw in either mode; check with `hotpath_symbols.sh` for `__cxa_throw`.
+  - `noexc` is a required config in every `build_matrix.sh` run that touches headers or error handling.
+
 ## Open questions for the owner
-1. Production target CPU and whether trading should set `-march`/LTO (not set today).
-2. Will trading move prices/qty to ScaleInt? (Decides whether `math` findings are latent or Critical.)
-3. Is `QUARK_NO_EXCEPTIONS` a supported production mode, or only a tested option?
-4. Is the hot/warm/cold map above right?
+1. Production hardware isn't decided. Re-run the target section when it is, especially if it isn't
+   AMD Zen 3 (the `-march=native` binary won't run elsewhere).

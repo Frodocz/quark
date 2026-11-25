@@ -91,6 +91,24 @@ template <SignedInteger T>
     }
 }
 
+// Returns x unchanged, but the compiler can no longer see that it is a product: a following addition
+// can't be contracted with it into an FMA, which clang's default -ffp-contract=on (and -ffp-contract=fast,
+// GCC's default in GNU mode) allow once -march provides FMA. No instruction is emitted: x stays in its register.
+// Constant evaluation never contracts, so it needs no barrier.
+[[nodiscard]] QUARK_ALWAYS_INLINE constexpr double fp_contract_barrier(double x) noexcept {
+    if (!std::is_constant_evaluated()) {
+#if defined(__x86_64__) || defined(__i386__)
+        asm("" : "+x"(x));
+#elif defined(__aarch64__)
+        asm("" : "+w"(x));
+#else
+        volatile double v = x;
+        x = v;
+#endif
+    }
+    return x;
+}
+
 }  // namespace detail
 
 // A positive tick size in raw units of ScaleInt<SCALE, Rep>, converted once (e.g. per instrument).
@@ -219,7 +237,10 @@ public:
     [[nodiscard]] static constexpr Rep to_raw(double v) noexcept {
         assert(math::abs(v) < MAX_ABS_DOUBLE && "not finite or out of range");  // NaN fails too
         constexpr double kJustBelowHalf = 0.49999999999999994;  // nextafter(0.5, 0)
-        return static_cast<Rep>(v * SCALE_AS_DOUBLE + (v < 0.0 ? -kJustBelowHalf : kJustBelowHalf));
+        // The product must be rounded before the half is added: as one FMA, an x like 500.0000000000001
+        // at SCALE 13 ends one raw unit up.
+        const double scaled = detail::fp_contract_barrier(v * SCALE_AS_DOUBLE);
+        return static_cast<Rep>(scaled + (v < 0.0 ? -kJustBelowHalf : kJustBelowHalf));
     }
 
     // Checked conversion for untrusted input: NaN, inf and out of range values return false.

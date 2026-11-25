@@ -4,6 +4,20 @@ All notable changes to quark are listed here. quark follows [semantic versioning
 the major version changes with incompatible API or ABI changes, so `find_package(quark 1.0)` accepts
 any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
+## [Unreleased]
+
+### Fixed
+
+- Clang builds failed to link the TLS code (undefined `quark::net::detail::openssl_error_string()` and
+  `on_new_tls_session()`): two internal headers declared `namespace quark::net::detail` /
+  `quark::crypto::detail` outside the versioned `quark::v1`, which GCC reopens as `quark::v1::…` but clang
+  doesn't. A test now checks that every `quark::` symbol of the library is in `quark::v1`.
+- `ScaleInt` from `double` (constructor, `operator=`, `try_from_double`, `TickSize`) could end one raw unit
+  off, depending on the compiler and `-march`: clang fused the scaling multiply and the rounding add into one
+  FMA (when folding constants, and at run time with `-march=native`), skipping the product's rounding, e.g. `ScaleInt<13>(500.0000000000001)` gave raw
+  5000000000000002 instead of 5000000000000001. The product is now always rounded first, the result GCC in
+  ISO mode already gave.
+
 ## [1.2.0]
 
 ### Added

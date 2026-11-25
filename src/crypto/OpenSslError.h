@@ -6,7 +6,9 @@
 
 #include <string>
 
-namespace quark::crypto::detail {
+QUARK_BEGIN_NAMESPACE
+
+namespace crypto::detail {
 
 /// Throws QuarkError carrying `what` and the first queued OpenSSL error (then clears the queue).
 [[noreturn]] inline void throw_openssl_error(const char* what) {
@@ -16,4 +18,6 @@ namespace quark::crypto::detail {
     QUARK_THROW(QuarkError{std::string(what) + ": " + reason});
 }
 
-} // namespace quark::crypto::detail
+} // namespace crypto::detail
+
+QUARK_END_NAMESPACE

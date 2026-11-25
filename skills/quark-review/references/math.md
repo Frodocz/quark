@@ -2,9 +2,11 @@
 
 Scope: `include/quark/math/*` and where utils/net use them.
 Consumer status: **trading doesn't use math today** (Price/Qty are `double` in
-`tradecommon/include/tc/Types.h`). Report findings as "latent" unless the owner has said trading is
-moving to ScaleInt (context.md, open question 2). Also check for **trading code that would benefit**:
-`double` prices compared for equality or accumulated.
+`tradecommon/include/tc/Types.h`), but **will move Price/Qty to ScaleInt** (owner 2026-11-25). Report
+findings as "latent-planned" and rate them by the impact they will have once ScaleInt carries prices
+(a wrong rounding then means a wrong order price). Also check what the move needs: double ↔ ScaleInt
+at the JSON boundary (parse straight into fixed point?), the cost on the hot path compared with `double`, and
+trading code that would benefit today (`double` prices compared for equality or accumulated).
 
 ## Checks
 1. Overflow semantics: what does each operation do on overflow (add/sub/mul/div, negate, abs,

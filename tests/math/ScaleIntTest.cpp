@@ -1089,6 +1089,27 @@ TEST_F(TestScaleInt, TestToRawMatchesLlround) {
     }
 }
 
+// to_raw rounds the product v * SCALE first, then adds the half: fusing the two into one FMA (clang's
+// default -ffp-contract=on, at compile time, and at run time once -march allows FMA) skips the product's
+// rounding and moved this value one raw unit up (5000000000000002).
+static_assert(DoubleE13(500.0000000000001).get_raw() == 5000000000000001);
+static_assert(DoubleE13(-500.0000000000001).get_raw() == -5000000000000001);
+
+TEST_F(TestScaleInt, TestToRawIsNotContractedAtRunTime) {
+    volatile double v = 500.0000000000001;  // a run-time value: the compiler can't fold it
+    EXPECT_EQ(DoubleE13(v).get_raw(), 5000000000000001);
+    v = -500.0000000000001;
+    EXPECT_EQ(DoubleE13(v).get_raw(), -5000000000000001);
+    // same rule for every scale: the result equals llround of the separately rounded product
+    std::mt19937_64 rng(11);
+    std::uniform_real_distribution<double> mantissa(1.0, 10.0);
+    for (int i = 0; i < 200'000; ++i) {
+        volatile double x = mantissa(rng) * 100.0;
+        const double product = x * DoubleE13::SCALE_AS_DOUBLE;  // its own statement: rounded
+        ASSERT_EQ(DoubleE13(x).get_raw(), std::llround(product)) << std::setprecision(17) << x;
+    }
+}
+
 // px * 1.5 would silently truncate the factor to 1
 static_assert(!std::is_invocable_v<std::multiplies<>, DoubleE8, double>);
 static_assert(!std::is_invocable_v<std::multiplies<>, double, DoubleE8>);
