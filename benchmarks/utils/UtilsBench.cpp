@@ -140,6 +140,12 @@ void BM_Tscns(benchmark::State& state) {
 }
 BENCHMARK(BM_Tscns);
 
+// EventLoop::now_ns(): never jumps on a system clock step, unlike tscns()
+void BM_SteadyNs(benchmark::State& state) {
+    for (auto _ : state) benchmark::DoNotOptimize(RdtscClock::steady_ns());
+}
+BENCHMARK(BM_SteadyNs);
+
 void BM_LoadBe64(benchmark::State& state) {
     std::vector<uint8_t> buf(4096 + 8, 0x5a);
     std::size_t i = 0;

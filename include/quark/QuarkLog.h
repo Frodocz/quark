@@ -146,6 +146,9 @@ QUARK_API void shutdown_log() noexcept;
 //
 // Polling also keeps RdtscClock calibrated against the system clock (RdtscClock::calibrate(),
 // one rdtsc() unless a calibration is due): make no other thread call RdtscClock::calibrate().
+// A due calibration runs inside the poll, on the polling thread (up to a few microseconds, every
+// second or so), and so does the formatting and writing of the queued logs: run the LogPoller on a
+// housekeeping thread, not on an event loop or other latency-sensitive thread.
 class QUARK_API LogPoller {
 public:
     LogPoller();   // At most one per process.

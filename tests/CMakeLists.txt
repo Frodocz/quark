@@ -109,6 +109,7 @@ endif ()
 
 # utils
 quark_add_test(quark_test_circular_buffer utils/CircularBufferTest.cpp)
+quark_add_test(quark_test_rdtsc_clock utils/RdtscClockTest.cpp)
 quark_add_test(quark_test_command_queue utils/CommandQueueTest.cpp)
 quark_add_test(quark_test_hw_endian utils/HwEndianTest.cpp)
 quark_add_test(quark_test_inplace_function utils/InplaceFunctionTest.cpp)

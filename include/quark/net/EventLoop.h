@@ -75,7 +75,7 @@ public:
             QUARK_THROW(QuarkError{"EventLoop: epoll_create1 failed"});
         }
         timers_.reserve(cfg_.max_timers);
-        now_ns_ = RdtscClock::tscns();
+        now_ns_ = RdtscClock::steady_ns();
     }
 
     EventLoop(const EventLoop&) = delete;
@@ -114,7 +114,9 @@ public:
     /// Timers run on the loop thread at the end of each step, against now_ns().
     [[nodiscard]] TimerQueue& timers() noexcept { return timers_; }
 
-    /// TSC time (ns) taken at the start of the current step: cheap "now" for timeouts.
+    /// RdtscClock::steady_ns() taken at the start of the current step: cheap "now" for timeouts and
+    /// timers. Nanoseconds since the epoch like the system clock, but it never jumps when the system
+    /// clock is stepped (it catches up at most 0.5% faster or slower): deadlines stay right.
     [[nodiscard]] int64_t now_ns() const noexcept { return now_ns_; }
 
     void set_step_hook(StepHook hook) { step_hook_ = std::move(hook); }
@@ -125,7 +127,7 @@ public:
     /// Returns whether the step did any work: input read (note_work()), events dispatched
     /// (Poller mode) or timers fired. Idle steps can be spent on housekeeping.
     QUARK_ATTRIBUTE_HOT bool step() {
-        now_ns_ = RdtscClock::tscns();
+        now_ns_ = RdtscClock::steady_ns();
         worked_ = false;
         if (step_hook_) step_hook_();
         if (cfg_.busy_poll) {
@@ -144,7 +146,7 @@ public:
                 on_wait_error();
                 dispatch_count_ = 0;
             }
-            if (timeout != 0) now_ns_ = RdtscClock::tscns();  // the wait may have blocked
+            if (timeout != 0) now_ns_ = RdtscClock::steady_ns();  // the wait may have blocked
             for (dispatch_idx_ = 0; dispatch_idx_ < dispatch_count_; ++dispatch_idx_) {
                 if (auto* p = static_cast<Pollable*>(events_[dispatch_idx_].token)) p->on_ready(events_[dispatch_idx_].flags);
             }

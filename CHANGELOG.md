@@ -8,6 +8,11 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Changed
 
+- `EventLoop::now_ns()` (and so every TimerQueue deadline, HttpClient timeout and WsSession liveness check)
+  is `RdtscClock::steady_ns()` instead of `tscns()`: still nanoseconds since the epoch, but a step of the
+  system clock no longer jumps it (with `tscns()`, a 30 s forward step made every deadline under 30 s fire
+  at once, and a backward step blinded the liveness checks). WsSession measures receive gaps and ping RTT
+  on the loop's clock; `WsMessage::recv_ns` stays `tscns()` (wall time).
 - `parse_http_response()` (HttpClient's parser) is strict about framing (RFC 9112 6.3): conflicting
   Content-Lengths, Content-Length together with Transfer-Encoding, a Transfer-Encoding whose last coding
   isn't `chunked`, a status below 100, whitespace before a header's colon and obsolete line folding are
@@ -30,6 +35,9 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Added
 
+- `RdtscClock::steady_ns()`: TSC time on a timebase that never jumps; its rate follows `CLOCK_MONOTONIC`
+  and any offset from the system clock (after a step) is caught up at most 0.5% faster or slower. Same
+  cost as `tscns()` (one `rdtsc`, ~10 ns); kept calibrated by the same `calibrate()` (every second).
 - `HttpParseState`: lets `parse_http_response()` resume where the previous call stopped on a growing
   buffer (HttpClient uses it): parsing a chunked body or long headers is no longer quadratic in the reads.
 - `WsGroupOptions::dedup_key`: an exchange-native dedup key (e.g. stream + update id) instead of hashing

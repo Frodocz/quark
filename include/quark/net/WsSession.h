@@ -38,7 +38,7 @@ struct WsMessage {
     WsOpcode opcode;
     std::span<const uint8_t> payload;
     std::size_t capacity;  ///< readable bytes from payload.data(): >= payload.size() + kPadding
-    int64_t recv_ns;       ///< RdtscClock::tscns() right after the read that completed it
+    int64_t recv_ns;       ///< RdtscClock::tscns() (wall time) right after the read that completed it
 
     [[nodiscard]] std::string_view text() const noexcept {
         return {reinterpret_cast<const char*>(payload.data()), payload.size()};
@@ -279,7 +279,8 @@ private:
     IOBuffer recv_;
     IOBuffer frag_;
     WsOpcode frag_opcode_{WsOpcode::Text};
-    int64_t recv_ns_{0};
+    int64_t recv_ns_{0};       // wall time of the last read, for messages (tscns)
+    int64_t recv_loop_ns_{0};  // the loop's clock at the last read, for liveness and RTT (never jumps)
 
     Pending pending_[kMaxPendingFrames];
     std::size_t pending_head_{0};
@@ -403,8 +404,8 @@ private:
 
     bool check_health() {
         const int64_t now = loop_.now_ns();
-        if (opts_.max_recv_gap_ns > 0 && now - recv_ns_ > opts_.max_recv_gap_ns) {
-            QUARK_LOG_WARN("ws {}: nothing received for {} ms, reconnecting", host_, (now - recv_ns_) / 1'000'000);
+        if (opts_.max_recv_gap_ns > 0 && now - recv_loop_ns_ > opts_.max_recv_gap_ns) {
+            QUARK_LOG_WARN("ws {}: nothing received for {} ms, reconnecting", host_, (now - recv_loop_ns_) / 1'000'000);
             teardown(true, true);
             return false;
         }
@@ -431,7 +432,7 @@ private:
     void on_pong() {
         if (!awaiting_pong_) return;
         awaiting_pong_ = false;
-        last_rtt_ns_ = recv_ns_ - ping_sent_ns_;
+        last_rtt_ns_ = recv_loop_ns_ - ping_sent_ns_;  // both on the loop's clock
     }
 
     /// Closes the connection. `reconnect`: schedule an automatic reconnect (unless closed by the
@@ -543,6 +544,7 @@ private:
                 return;
             }
             recv_ns_ = RdtscClock::tscns();
+            recv_loop_ns_ = loop_.now_ns();
             recv_.append(static_cast<std::size_t>(n));
             if (state_ == State::Upgrading) {
                 if (!process_upgrade_response()) return;
