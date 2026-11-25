@@ -179,3 +179,92 @@ TEST_F(TestHttpCodec, BodylessPostCarriesContentLength) {
     const std::size_t d = build_http_request(out, HttpMethod::Delete, "h", "/x", {}, {});
     EXPECT_EQ(std::string_view(out, d), "DELETE /x HTTP/1.1\r\nHost: h\r\n\r\n");
 }
+
+// NET-02: interim responses were skipped by recursion, one stack frame each: a server sending
+// ~58k "100 Continue" responses into a 1 MiB buffer overflowed the stack (SIGSEGV)
+TEST_F(TestHttpCodec, InterimResponseFloodIsMalformedNotACrash) {
+    std::string s;
+    while (s.size() < (1u << 20)) s += "HTTP/1.1 100 Continue\r\n\r\n";
+    auto b = buf(s);
+    const auto r = parse_http_response(b);
+    EXPECT_TRUE(r.complete);
+    EXPECT_TRUE(r.malformed);
+
+    // a few are fine
+    auto ok = buf("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n"
+                  "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+    const auto r2 = parse_http_response(ok);
+    ASSERT_TRUE(r2.complete);
+    EXPECT_FALSE(r2.malformed);
+    EXPECT_EQ(body_of(r2), "hi");
+    EXPECT_EQ(r2.consumed, ok.size());
+}
+
+// NET-09: framing the server can't mean, or that hides another response, is an error (RFC 9112 6.3)
+TEST_F(TestHttpCodec, AmbiguousFramingIsMalformed) {
+    auto malformed = [](std::string_view s) {
+        auto b = buf(s);
+        const auto r = parse_http_response(b);
+        return r.complete && r.malformed;
+    };
+    EXPECT_TRUE(malformed("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 5\r\n\r\nabcde"));
+    EXPECT_TRUE(malformed("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n"));
+    EXPECT_TRUE(malformed("HTTP/1.1 200 OK\r\nTransfer-Encoding: xchunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n"));
+    EXPECT_TRUE(malformed("HTTP/1.1 000 Zero\r\nContent-Length: 0\r\n\r\n"));
+    EXPECT_TRUE(malformed("HTTP/1.1 099 Low\r\nContent-Length: 0\r\n\r\n"));
+    EXPECT_TRUE(malformed("HTTP/1.1 200 OK\r\nContent-Length : 3\r\n\r\nabc"));      // space before the colon
+    EXPECT_TRUE(malformed("HTTP/1.1 200 OK\r\nX-A: 1\r\n folded\r\nContent-Length: 0\r\n\r\n"));  // obs-fold
+
+    // still accepted: an identical repeated Content-Length, a coding list ending in chunked
+    auto same = buf("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc");
+    const auto r1 = parse_http_response(same);
+    ASSERT_TRUE(r1.complete);
+    EXPECT_FALSE(r1.malformed);
+    EXPECT_EQ(body_of(r1), "abc");
+    auto list = buf("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+    const auto r2 = parse_http_response(list);
+    ASSERT_TRUE(r2.complete);
+    EXPECT_FALSE(r2.malformed);
+}
+
+TEST_F(TestHttpCodec, ConnectionTokensAndBodylessStatuses) {
+    auto b = buf("HTTP/1.1 200 OK\r\nConnection: keep-alive, close\r\nContent-Length: 0\r\n\r\n");
+    EXPECT_FALSE(parse_http_response(b).keep_alive);  // close wins wherever it is in the list
+
+    // 204 and 304 never have a body, whatever their headers say: waiting for one stalls until the timeout
+    for (const char* status : {"204 No Content", "304 Not Modified"}) {
+        auto r = buf(std::string("HTTP/1.1 ") + status + "\r\nContent-Length: 5\r\n\r\n");
+        const auto v = parse_http_response(r);
+        ASSERT_TRUE(v.complete) << status;
+        EXPECT_FALSE(v.malformed);
+        EXPECT_TRUE(v.body.empty());
+        EXPECT_EQ(v.consumed, r.size());
+    }
+}
+
+// NET-09: with a parse state the next call resumes where the last one stopped, instead of rescanning
+// every chunk from the start on each read (1-byte chunks made a 1 MiB body cost ~60 ms to parse)
+TEST_F(TestHttpCodec, ParseStateResumesAndGivesTheSameResult) {
+    std::string body_chunks;
+    std::string expected;
+    for (int i = 0; i < 2000; ++i) {
+        body_chunks += "1\r\n" + std::string(1, char('a' + i % 26)) + "\r\n";
+        expected += char('a' + i % 26);
+    }
+    const std::string msg = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                            body_chunks + "0\r\nX-Trailer: t\r\n\r\n";
+    for (std::size_t step : {1u, 7u, 64u}) {
+        std::vector<uint8_t> b;
+        HttpParseState state;
+        HttpResponseView r;
+        for (std::size_t off = 0; off < msg.size() && !r.complete; off += step) {
+            b.insert(b.end(), msg.begin() + static_cast<std::ptrdiff_t>(off),
+                     msg.begin() + static_cast<std::ptrdiff_t>(std::min(msg.size(), off + step)));
+            r = parse_http_response(b, &state);
+        }
+        ASSERT_TRUE(r.complete) << step;
+        EXPECT_FALSE(r.malformed);
+        EXPECT_EQ(body_of(r), expected) << step;
+        EXPECT_EQ(r.consumed, msg.size());
+    }
+}

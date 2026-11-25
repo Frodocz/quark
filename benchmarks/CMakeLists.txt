@@ -33,6 +33,7 @@ quark_add_benchmark(quark_bench_loop_utils utils/LoopUtilsBench.cpp)
 quark_add_benchmark(quark_bench_utils utils/UtilsBench.cpp)
 target_compile_definitions(quark_bench_utils PRIVATE QUARK_BENCH_DATA_DIR="${PROJECT_SOURCE_DIR}/tests")
 quark_add_benchmark(quark_bench_codec net/CodecBench.cpp)
+quark_add_benchmark(quark_bench_ws_group_dedup net/WsGroupDedupBench.cpp)
 quark_add_benchmark(quark_bench_crypto crypto/CryptoBench.cpp)
 quark_add_benchmark(quark_bench_math math/MathBench.cpp)
 

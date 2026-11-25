@@ -2,9 +2,12 @@
 #include "quark/net/TlsStream.h"
 #include "gtest/gtest.h"
 
+#include <openssl/err.h>
+
 #include <atomic>
 #include <chrono>
 #include <string>
+#include <thread>
 
 using namespace quark::net;
 using namespace quark::net::test;
@@ -238,4 +241,32 @@ TEST_F(TestTlsStream, SessionIsNotResumedForAnotherHost) {
     ASSERT_TRUE(s.connect(server.endpoint()));
     ASSERT_EQ(open_within(s), StreamPhase::Open);
     EXPECT_TRUE(s.session_resumed());
+}
+
+// NET-06: OpenSSL's SSL_get_error() looks at the thread's error queue first. One stale entry, left by
+// any other OpenSSL call on the loop thread (another stream, a signer...), made a read with nothing to
+// decrypt yet report SSL_ERROR_SSL: the healthy connection was torn down (the OpenSSL backend; AWS-LC
+// reported -EAGAIN).
+TEST_F(TestTlsStream, StaleErrorOnTheThreadDoesNotFailAHealthyConnection) {
+    TestServer server(echo_handler, {.tls = true});
+    TlsContext ctx(trusting_test_ca());
+    TlsStream s;
+    s.set_context(ctx);
+    s.set_hostname("localhost");
+    ASSERT_TRUE(s.connect(server.endpoint()));
+    ASSERT_EQ(open_within(s), StreamPhase::Open);
+    uint8_t buf[256];
+    std::this_thread::sleep_for(100ms);  // session tickets
+    while (s.read(buf) > 0) {
+    }
+    for (int i = 0; i < 3; ++i) {
+        ERR_put_error(ERR_LIB_EVP, 0, ERR_R_EVP_LIB, __FILE__, __LINE__);
+        EXPECT_EQ(s.read(buf), -EAGAIN);  // nothing to read: retry later, not a failure
+        EXPECT_FALSE(s.closed());
+    }
+    ERR_put_error(ERR_LIB_EVP, 0, ERR_R_EVP_LIB, __FILE__, __LINE__);
+    const std::string msg = "still works";
+    ASSERT_EQ(s.write({reinterpret_cast<const uint8_t*>(msg.data()), msg.size()}, false), static_cast<int64_t>(msg.size()));
+    EXPECT_EQ(read_all_available(s, msg.size()), msg);
+    ::ERR_clear_error();
 }

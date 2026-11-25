@@ -8,6 +8,15 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Changed
 
+- `parse_http_response()` (HttpClient's parser) is strict about framing (RFC 9112 6.3): conflicting
+  Content-Lengths, Content-Length together with Transfer-Encoding, a Transfer-Encoding whose last coding
+  isn't `chunked`, a status below 100, whitespace before a header's colon and obsolete line folding are
+  malformed. 204 and 304 responses never have a body. `Connection` is read as a token list (`close` wins).
+- HttpClient: a keep-alive connection the server closes while idle, after it served a response, is
+  reopened right away with the backoff reset (it grew with every such close: up to 30 s of NotReady).
+- HttpClient: without `auto_reconnect`, a failed connect or a connect timeout reports `on_error`.
+- WsSession and HttpClient refuse `reconnect_initial_ns <= 0` and `reconnect_max_ns < reconnect_initial_ns`
+  at construction (QuarkError, fatal with `QUARK_NO_EXCEPTIONS`).
 - **(breaking)** `ShmDirectory::alive()` returns `std::optional<std::vector<std::string>>`: `nullopt` when the
   scan fails (no fd left, a permission error), instead of an empty list that callers took for "every client
   exited". A missing directory is still an empty list. `is_alive()` is replaced by `liveness()`, which returns
@@ -21,6 +30,12 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Added
 
+- `HttpParseState`: lets `parse_http_response()` resume where the previous call stopped on a growing
+  buffer (HttpClient uses it): parsing a chunked body or long headers is no longer quadratic in the reads.
+- `WsGroupOptions::dedup_key`: an exchange-native dedup key (e.g. stream + update id) instead of hashing
+  the whole text of every copy (~0.4 cycles/byte before the first copy is delivered; ~70 ns flat with a key).
+- `WsSessionOptions::max_read_bytes_per_poll`: in busy-poll mode, the most bytes one step reads from a
+  session, so a burst on one feed can't hold the loop.
 - `FullDuplexShm::try_open()`: opens without throwing (also with `QUARK_NO_EXCEPTIONS`), the reason in an
   optional `std::string*`; for servers opening their clients' files at run time.
 - `FullDuplexShm::dropped_on_open()`: the stale messages dropped from the read queue at open (by design).
@@ -32,6 +47,19 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Fixed
 
+- `HttpClient::request()` returned `Ok` after the connection had failed inside it and `on_error` had
+  already run: callers that set "busy" on `Ok` stayed busy forever. Such a failure is now reported by
+  `on_error` after `request()` returns (an `Ok` request always gets exactly one later callback).
+- A stream of 1xx interim responses overflowed the stack (one recursive call each: SIGSEGV with a 1 MiB
+  buffer). They are skipped in a loop, at most `kMaxInterimResponses` (16).
+- TLS over OpenSSL: a stale entry in the thread's OpenSSL error queue (from any other OpenSSL call on the
+  thread) made a read or write on a healthy connection fail and tear it down. The queue is cleared before
+  each SSL call (OpenSSL backend only: AWS-LC was not affected).
+- `WsGroup::send_best()` returned WouldBlock when the lowest-RTT session's queue was full although
+  another session was open: the next one is tried (only for WouldBlock: a Dropped frame may have reached
+  the venue).
+- HttpClient: a close-delimited response that exactly filled the receive buffer failed instead of being
+  delivered at the close.
 - `Journal::append()` accepted an empty payload, which is the journal's end marker: replay stopped there,
   and the next reopen overwrote every later record. Empty appends are now refused.
 

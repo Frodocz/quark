@@ -1,3 +1,4 @@
+#include "QuarkTest.h"
 #include "TestServers.h"
 #include "quark/net/BufferPool.h"
 #include "quark/net/EventLoop.h"
@@ -541,6 +542,51 @@ TEST_P(TestWsSession, EndpointProviderChoosesTheReconnectAddress) {
         client.ws->set_endpoint_provider([next] { return next; });
         client.ws->connect(first.endpoint());
         EXPECT_TRUE(run_until(client.loop, [&] { return second.accepted() >= 1 && client.ws->is_open(); }));
+    });
+}
+
+// NET-07: read_input() read until the socket was empty: a burst on one feed held the loop (other
+// sessions, the step hook, timers) until it was drained. With a budget, a busy-poll step reads at most
+// that many bytes per session and the next step goes on (epoll mode must drain each edge: no budget).
+TEST_P(TestWsSession, ReadBudgetBoundsTheWorkOfOneStep) {
+    TestServer server(
+        [](ServerConn& c, TestServer& s) {
+            c.accept_websocket();
+            c.cork(true);
+            for (int i = 0; i < 300; ++i) c.send_frame(WsOpcode::Text, std::string(96, 'a' + i % 26));
+            c.cork(false);
+            s.hold();
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        WsSessionOptions opts = fast_reconnect();
+        opts.max_read_bytes_per_poll = 2048;
+        Client<T> client(busy(), opts);
+        client.ws->connect(server.endpoint());
+        std::size_t most_in_one_step = 0;
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (client.messages.size() < 300 && std::chrono::steady_clock::now() < deadline) {
+            const std::size_t before = client.messages.size();
+            client.loop.step();
+            most_in_one_step = std::max(most_in_one_step, client.messages.size() - before);
+        }
+        EXPECT_EQ(client.messages.size(), 300u);  // nothing lost or stuck, in either mode
+        if (busy()) {
+            EXPECT_LE(most_in_one_step, 2048u / 98 + 1);  // 98-byte frames
+        }
+    });
+}
+
+// NET-11: the backoff's preconditions were only assert()ed: a zero initial delay in a Release build
+// reconnected every nanosecond
+TEST_P(TestWsSession, InvalidReconnectOptionsAreRefused) {
+    with_transport([&]<class T>() {
+        EventLoop loop{{.busy_poll = busy()}};
+        BufferPool recv{2, 4096, {.huge_pages = MemoryArena::HugePages::Never}};
+        BufferPool send{2, 4096, {.huge_pages = MemoryArena::HugePages::Never}};
+        QUARK_EXPECT_ERROR((WsSession<T>(loop, recv, send, {.reconnect_initial_ns = 0})), "reconnect");
+        QUARK_EXPECT_ERROR((WsSession<T>(loop, recv, send, {.reconnect_initial_ns = 2'000'000'000, .reconnect_max_ns = 1'000'000'000})),
+                           "reconnect");
     });
 }
 

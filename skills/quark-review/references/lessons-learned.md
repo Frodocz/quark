@@ -27,3 +27,29 @@ the reviewer may propose candidates but must not edit this file.
   intentional); ctest `quark_test_symbols_versioned` fails on any `quark::` symbol outside `quark::v1`;
   build once with clang.
 - Fix commit / date: 4371aba (2026-11-25)
+
+### LL-002 "Success" returned after a callback already reported the failure
+- Module / file: `net/HttpClient.h` (`request()`), and `HttpPool` through it
+- Symptom and trigger: the peer reset an idle keep-alive connection; the next `request()` failed while
+  sending, called `on_error` from inside, then returned `Submit::Ok`. Trading's callers set
+  "busy" on `Ok` after their `on_error` had already cleared it: REST snapshots (alphaframe) and REST
+  queries (tradeserver) stopped for the life of the process.
+- Root cause: a synchronous failure path (`fail()` → `on_error_()`) reachable from inside an API call
+  whose return value the caller trusts. The two channels disagreed about what happened.
+- How to check: for every call that can tear down (`fail()`, `teardown()`, write/flush errors), see
+  whether it is reachable from a public call that then returns success. An accepted request must get
+  exactly one later callback; failures inside the call are deferred (a zero-delay timer) or returned.
+  Test: make the failure synchronous (RST before the call, without stepping the loop) and check that
+  no callback runs inside the call.
+- Fix commit / date: NET-01 (2026-11-25)
+
+### LL-003 Recursion on network input
+- Module / file: `net/HttpCodec.h` (`parse_http_response`)
+- Symptom and trigger: one stack frame per 1xx interim response; ~58k "100 Continue" responses in a
+  1 MiB receive buffer (the tradeserver's size) overflowed the stack: SIGSEGV.
+- Root cause: a parser that calls itself once per repeated element of untrusted input, with work after
+  the call (no tail call), so depth grows with the input.
+- How to check: `grep` parsers for self-calls; replace with a loop and a cap. Fuzz with inputs as large
+  as the production buffers (`-max_len` of 4 KiB missed this one); add a test with a buffer-filling
+  flood of the repeated element.
+- Fix commit / date: NET-02 (2026-11-25)

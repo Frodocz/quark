@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quark/Attributes.h"
+#include "quark/QuarkError.h"
 #include "quark/QuarkLog.h"
 #include "quark/net/BufferPool.h"
 #include "quark/net/Endpoint.h"
@@ -41,12 +42,19 @@ struct HttpClientOptions {
 /// - Two buffers from `pool`: requests are built in one, responses parsed in place in the other
 ///   (size them for the largest response, e.g. an order book snapshot).
 /// - A keep-alive connection the server closes while idle is noticed right away and reopened
-///   (auto_reconnect), instead of failing the next request.
+///   (auto_reconnect) at once, without backoff once it has served a response, instead of failing
+///   the next request.
+/// - request() returning Ok means exactly one of on_response / on_error follows, later, from the
+///   loop: never from inside request(), even when the connection fails while it sends.
+/// - Without auto_reconnect, a failed connect or connect timeout reports on_error (nothing else
+///   will happen); with it the client keeps retrying, with backoff.
 /// - Connection: close responses, malformed responses, transport errors and timeouts drop the
 ///   connection; the last three also report on_error. After a Connection: close response the
 ///   client reconnects right away (no backoff) and is NotReady inside that on_response.
 /// - A response without Content-Length or chunked encoding ends when the server closes the
 ///   connection (over TLS, a close without close_notify can't be told apart from truncation).
+///
+/// Callbacks may call request(), close() and connect(), but must not destroy the client.
 template <Stream Transport>
 class HttpClient final : public Pollable {
 public:
@@ -60,12 +68,13 @@ public:
     HttpClient(EventLoop& loop, BufferPool& pool) : HttpClient(loop, pool, Options{}) {}
 
     HttpClient(EventLoop& loop, BufferPool& pool, const Options& options)
-        : loop_{loop}, pool_{pool}, opts_{options},
+        : loop_{loop}, pool_{pool}, opts_{checked(options)},
           backoff_{options.reconnect_initial_ns, options.reconnect_max_ns, 0.2, os_random_u64()} {}
 
     ~HttpClient() override {
         user_closed_ = true;
         cancel_timer(reconnect_timer_);
+        cancel_timer(error_timer_);
         teardown(false);
         pool_.release(send_);
         pool_.release(recv_);
@@ -110,6 +119,7 @@ public:
         send_.append(n);
         send_off_ = 0;
         recv_.reset();
+        parse_ = {};
         state_ = State::Busy;
         if (opts_.request_timeout_ns > 0) {
             request_timer_ = loop_.timers().add_task("http_request_timeout", [this] {
@@ -121,7 +131,9 @@ public:
                 return false;
             }, loop_.now_ns() + opts_.request_timeout_ns);
         }
+        in_request_ = true;  // a failure while sending is reported after this returns Ok
         flush_send();
+        in_request_ = false;
         return Submit::Ok;
     }
 
@@ -141,7 +153,7 @@ public:
                     set_write_interest(false);
                 } else if (ph != StreamPhase::Connecting) {
                     QUARK_LOG_WARN("http {}: connect to {} failed", host_, ep_.to_string());
-                    teardown(true);
+                    connect_failed();
                 }
                 return;
             }
@@ -171,19 +183,30 @@ private:
     IOBuffer send_;
     std::size_t send_off_{0};
     IOBuffer recv_;
+    HttpParseState parse_;  // where parsing of the response in recv_ stopped
     ExpBackoff backoff_;
+    bool in_request_{false};  // inside request(): on_error is deferred until it has returned
+    bool served_{false};      // this connection completed a response (an idle close is then routine)
     int64_t opened_at_ns_{0};
     TimerId connect_timer_{};
     TimerId request_timer_{};
     TimerId reconnect_timer_{};
+    TimerId error_timer_{};  // a deferred on_error
     ResponseHandler on_response_;
     ErrorHandler on_error_;
     EndpointProvider endpoint_provider_;
 
+    // Checked in every build type (ExpBackoff only assert()s them): a zero initial delay would
+    // reconnect every nanosecond. Throws QuarkError (fatal with QUARK_NO_EXCEPTIONS) at construction.
+    static const Options& checked(const Options& o) {
+        QUARK_ASSERT(o.reconnect_initial_ns > 0 && o.reconnect_max_ns >= o.reconnect_initial_ns);
+        return o;
+    }
+
     QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void start_connect() {
         if ((!send_ && !(send_ = pool_.acquire())) || (!recv_ && !(recv_ = pool_.acquire()))) {
             QUARK_LOG_ERROR("http {}: no buffers available", host_);
-            schedule_reconnect();
+            connect_failed(/*deferred=*/true);
             return;
         }
         if constexpr (requires(Transport& t, std::string_view h) { t.set_hostname(h); }) {
@@ -191,7 +214,7 @@ private:
         }
         if (!transport_.connect(ep_) || !loop_.add(*this, true)) {
             transport_.close();
-            schedule_reconnect();
+            connect_failed(/*deferred=*/true);  // may run inside connect(): report after it returns
             return;
         }
         registered_ = true;
@@ -202,7 +225,7 @@ private:
                 connect_timer_ = kInvalidTimerId;
                 if (state_ == State::Connecting) {
                     QUARK_LOG_WARN("http {}: connect to {} timed out", host_, ep_.to_string());
-                    teardown(true);
+                    connect_failed();
                 }
                 return false;
             }, loop_.now_ns() + opts_.connect_timeout_ns);
@@ -242,6 +265,19 @@ private:
         for (;;) {
             const std::span<uint8_t> space = recv_.spare();
             if (space.empty()) {
+                // full: a close-delimited body may end exactly here, which only the close tells
+                if (parse_http_response(recv_.bytes(), &parse_).close_delimited) {
+                    uint8_t probe;
+                    const sys::io_result p = transport_.read({&probe, 1});
+                    if (p == -EAGAIN) return;
+                    if (p == 0) {
+                        HttpResponseView r = parse_http_response(recv_.bytes(), &parse_);
+                        r.complete = true;
+                        r.consumed = recv_.size();
+                        complete_response(r);
+                        return;
+                    }
+                }
                 QUARK_LOG_ERROR("http {}: response larger than the {} byte buffer", host_, recv_.capacity());
                 fail();
                 return;
@@ -251,7 +287,7 @@ private:
             loop_.note_work();
             if (n <= 0) {
                 if (n == 0) {
-                    HttpResponseView r = parse_http_response(recv_.bytes());
+                    HttpResponseView r = parse_http_response(recv_.bytes(), &parse_);
                     if (r.close_delimited) {  // its end is this close
                         r.complete = true;
                         r.consumed = recv_.size();
@@ -264,7 +300,7 @@ private:
                 return;
             }
             recv_.append(static_cast<std::size_t>(n));
-            const HttpResponseView r = parse_http_response(recv_.bytes());
+            const HttpResponseView r = parse_http_response(recv_.bytes(), &parse_);
             if (!r.complete) continue;
             if (r.malformed) {
                 QUARK_LOG_WARN("http {}: malformed response", host_);
@@ -285,14 +321,16 @@ private:
             teardown(false);
         } else {
             state_ = State::Idle;
+            served_ = true;
         }
         const uint32_t gen = conn_gen_;
-        if (on_response_) on_response_(r);  // r.body stays valid: recv_ is kept until the next request
+        if (on_response_) on_response_(r);  // r.body is valid during the callback only
         if (gen != conn_gen_) return;      // closed or reconnected in the callback
         if (!r.keep_alive) {
             if (opts_.auto_reconnect && !user_closed_) reconnect();
         } else if (state_ == State::Idle) {
             recv_.reset();
+            parse_ = {};
         }
     }
 
@@ -301,8 +339,16 @@ private:
         uint8_t probe[64];
         const sys::io_result n = transport_.read(probe);
         if (n == -EAGAIN) return;
-        if (n == 0) {
+        if (n == 0 && served_) {
+            // the server's keep-alive timeout: routine, reopen right away (no backoff growth)
             QUARK_LOG_INFO("http {}: idle connection closed by server", host_);
+            backoff_.reset();
+            teardown(false);
+            if (opts_.auto_reconnect && !user_closed_) reconnect();
+            return;
+        }
+        if (n == 0) {
+            QUARK_LOG_INFO("http {}: idle connection closed by server before any response", host_);
         } else {
             QUARK_LOG_WARN("http {}: unexpected data on an idle connection", host_);
         }
@@ -311,7 +357,27 @@ private:
 
     QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void fail() {
         teardown(true);
-        if (on_error_) on_error_();
+        report_error(/*deferred=*/in_request_);
+    }
+
+    // Without auto_reconnect nothing else will happen after this: tell the user.
+    QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void connect_failed(bool deferred = false) {
+        teardown(true);
+        if (!opts_.auto_reconnect && !user_closed_) report_error(deferred);
+    }
+
+    // `deferred`: from inside a call of the user's (request(), connect()), which must return first
+    void report_error(bool deferred) {
+        if (!deferred) {
+            if (on_error_) on_error_();
+            return;
+        }
+        if (error_timer_) return;  // one is pending already
+        error_timer_ = loop_.timers().add_task("http_error", [this] {
+            error_timer_ = kInvalidTimerId;
+            if (on_error_) on_error_();
+            return false;
+        }, loop_.now_ns());
     }
 
     QUARK_NOINLINE QUARK_ATTRIBUTE_COLD void teardown(bool reconnect) {
@@ -326,6 +392,7 @@ private:
         cancel_timer(request_timer_);
         if (opened_at_ns_ != 0 && loop_.now_ns() - opened_at_ns_ >= opts_.stable_after_ns) backoff_.reset();
         opened_at_ns_ = 0;
+        served_ = false;
         state_ = State::Disconnected;
         if (reconnect) schedule_reconnect();
     }

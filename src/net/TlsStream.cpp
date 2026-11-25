@@ -28,6 +28,20 @@ struct TlsStreamAccess {
     }
 };
 
+namespace {
+
+// OpenSSL's SSL_get_error() reports SSL_ERROR_SSL whenever the thread's error queue isn't empty, so
+// a stale entry from any other OpenSSL call on this thread would fail a healthy connection: the queue
+// must be empty before each SSL I/O call. AWS-LC's SSL_get_error() doesn't look at the queue for
+// these, so nothing is done there (no cost on the default backend's hot path).
+QUARK_ALWAYS_INLINE void clear_stale_errors() noexcept {
+#if !defined(OPENSSL_IS_AWSLC)
+    ::ERR_clear_error();
+#endif
+}
+
+}  // namespace
+
 namespace detail {
 
 int tls_stream_ex_index() {
@@ -120,6 +134,7 @@ StreamPhase TlsStream::poll_open() {
     }
     if (phase_ == Phase::Handshaking) {
         for (;;) {
+            clear_stale_errors();
             const int r = ::SSL_do_handshake(ssl_);
             if (r == 1) {
                 if (!flush_out()) {
@@ -214,6 +229,7 @@ sys::io_result TlsStream::read(std::span<uint8_t> dst) noexcept {
     }
     const int want = dst.size() > INT_MAX ? INT_MAX : static_cast<int>(dst.size());
     for (;;) {
+        clear_stale_errors();
         const int n = ::SSL_read(ssl_, dst.data(), want);
         if (n > 0) return n;
         const int err = ::SSL_get_error(ssl_, n);
@@ -254,6 +270,7 @@ sys::io_result TlsStream::write(std::span<const uint8_t> src, bool /*more*/) noe
         if (pending_ciphertext() >= kMaxPendingCiphertext) return -EAGAIN;  // peer isn't reading
     }
     const int len = src.size() > INT_MAX ? INT_MAX : static_cast<int>(src.size());
+    clear_stale_errors();
     const int n = ::SSL_write(ssl_, src.data(), len);
     if (n <= 0) {
         const int err = ::SSL_get_error(ssl_, n);

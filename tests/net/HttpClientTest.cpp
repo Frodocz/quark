@@ -1,3 +1,4 @@
+#include "QuarkTest.h"
 #include "TestServers.h"
 #include "quark/net/BufferPool.h"
 #include "quark/net/EventLoop.h"
@@ -10,7 +11,10 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <sys/socket.h>
 
 using namespace quark;
 using namespace quark::net;
@@ -226,6 +230,125 @@ TEST_P(TestHttpClient, CloseDelimitedBodyIsDeliveredAtEof) {
         ASSERT_EQ(client.responses.size(), 1u);
         EXPECT_EQ(client.responses[0], (std::pair<int, std::string>{200, "{\"bids\":[]}"}));
         EXPECT_EQ(client.errors, 0);
+    });
+}
+
+// NET-01: the peer reset an idle keep-alive connection, and the next request() came before the loop
+// noticed: the write failed inside request(), which reported on_error and then returned Ok anyway.
+// Callers that set "busy" on Ok (after on_error had already cleared it) stayed busy forever.
+TEST_P(TestHttpClient, FailureInsideRequestIsReportedAfterItReturns) {
+    TestServer server(
+        [](ServerConn& c, TestServer& s) {
+            if (s.accepted() == 1) {
+                serve(c, s, {"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n1"}, false);
+                std::this_thread::sleep_for(100ms);  // the client reads the response first: an RST drops unread data
+                const linger reset{1, 0};  // close with RST
+                ::setsockopt(c.fd(), SOL_SOCKET, SO_LINGER, &reset, sizeof(reset));
+            } else {
+                serve(c, s, {"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n2"}, true);
+            }
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client;
+        client.http->connect(server.endpoint());
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.http->ready(); }));
+        ASSERT_EQ(client.get("/1"), HttpSubmit::Ok);
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.responses.size() == 1; }));
+        std::this_thread::sleep_for(300ms);  // the RST arrives while the loop doesn't run
+
+        bool in_request = true;
+        int errors_inside = 0;
+        client.http->on_error([&] { errors_inside += in_request; ++client.errors; });
+        const HttpSubmit submit = client.get("/2");
+        in_request = false;
+        if (submit == HttpSubmit::Ok) {
+            // accepted: its outcome comes later, exactly once, from the loop
+            EXPECT_EQ(errors_inside, 0);
+            EXPECT_TRUE(run_until(client.loop, [&] { return client.errors + static_cast<int>(client.responses.size()) == 2; }));
+        }
+        EXPECT_EQ(errors_inside, 0);
+        // and the client recovers for the next request
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.http->ready(); }));
+        ASSERT_EQ(client.get("/3"), HttpSubmit::Ok);
+        EXPECT_TRUE(run_until(client.loop, [&] { return client.responses.size() >= 2; }));
+    });
+}
+
+// NET-04: a server that closes idle keep-alive connections (a normal timeout) is reconnected at once,
+// not after a backoff that doubled with every close (0.5, 1, 2 ... 30 s of NotReady)
+TEST_P(TestHttpClient, IdleClosesDoNotEscalateTheBackoff) {
+    TestServer server(
+        [](ServerConn& c, TestServer& s) {
+            serve(c, s, {"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"}, false);
+            std::this_thread::sleep_for(20ms);  // then the server's idle timeout closes it
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client({.reconnect_initial_ns = 100'000'000});
+        client.http->connect(server.endpoint());
+        for (int i = 0; i < 6; ++i) {
+            ASSERT_TRUE(run_until(client.loop, [&] { return client.http->ready(); }));
+            ASSERT_EQ(client.get("/x"), HttpSubmit::Ok);
+            ASSERT_TRUE(run_until(client.loop, [&] { return client.responses.size() == static_cast<std::size_t>(i + 1); }))
+                << "cycle " << i;
+            // counted only now: over TCP the client is ready before the server's accept() returns
+            const int accepted = server.accepted();
+            const auto t0 = std::chrono::steady_clock::now();
+            ASSERT_TRUE(run_until(client.loop, [&] { return server.accepted() > accepted && client.http->ready(); }));
+            // with backoff: 100, 200, 400, 800 ... ms; reopened right away: the 20 ms idle wait plus a connect
+            EXPECT_LT(std::chrono::steady_clock::now() - t0, 90ms) << "cycle " << i;
+        }
+        EXPECT_EQ(client.errors, 0);
+    });
+}
+
+// NET-10: without auto_reconnect nothing else will happen after a failed connect: say so
+TEST_P(TestHttpClient, ConnectFailureWithoutAutoReconnectReportsAnError) {
+    const Endpoint closed = [] {  // a local port nobody listens on
+        TestServer s([](ServerConn&, TestServer&) {});
+        const Endpoint ep = s.endpoint();
+        s.stop();
+        return ep;
+    }();
+    with_transport([&]<class T>() {
+        Client<T> client({.auto_reconnect = false});
+        client.http->connect(closed);
+        EXPECT_TRUE(run_until(client.loop, [&] { return client.errors == 1; }));
+        EXPECT_EQ(client.http->state(), HttpClientState::Disconnected);
+    });
+}
+
+// NET-10: a close-delimited response that exactly fills the receive buffer is complete at the close
+TEST_P(TestHttpClient, CloseDelimitedResponseFillingTheBufferIsDelivered) {
+    const std::string head = "HTTP/1.1 200 OK\r\n\r\n";
+    const std::string body(16 * 1024 - head.size(), 'b');  // the client's buffers are 16 KiB
+    TestServer server(
+        [&](ServerConn& c, TestServer&) {
+            if (c.read_until("\r\n\r\n").empty()) return;
+            c.write_all(head + body);  // then closes: the end of the body
+        },
+        server_opts());
+    with_transport([&]<class T>() {
+        Client<T> client({.auto_reconnect = false});
+        client.http->connect(server.endpoint());
+        ASSERT_TRUE(run_until(client.loop, [&] { return client.http->ready(); }));
+        ASSERT_EQ(client.get("/big"), HttpSubmit::Ok);
+        ASSERT_TRUE(run_until(client.loop, [&] { return !client.responses.empty() || client.errors > 0; }));
+        EXPECT_EQ(client.errors, 0);
+        ASSERT_EQ(client.responses.size(), 1u);
+        EXPECT_EQ(client.responses[0].second.size(), body.size());
+    });
+}
+
+// NET-11: as for WsSession, invalid reconnect options are refused at construction
+TEST_P(TestHttpClient, InvalidReconnectOptionsAreRefused) {
+    with_transport([&]<class T>() {
+        EventLoop loop{{.busy_poll = true}};
+        BufferPool pool{2, 4096, {.huge_pages = MemoryArena::HugePages::Never}};
+        QUARK_EXPECT_ERROR((HttpClient<T>(loop, pool, {.reconnect_initial_ns = 0})), "reconnect");
+        QUARK_EXPECT_ERROR((HttpClient<T>(loop, pool, {.reconnect_initial_ns = 2'000'000'000, .reconnect_max_ns = 1'000'000'000})),
+                           "reconnect");
     });
 }
 

@@ -31,6 +31,10 @@ struct WsGroupOptions {
     int64_t rotate_interval_ns = 60'000'000'000;
     int64_t warmup_ns = 30'000'000'000;  ///< a session's delay counts after it has been open this long
     double delay_ema_alpha = 0.01;
+    /// Dedup key of a message (e.g. a hash of its stream and update id), instead of hashing its whole
+    /// text (~0.4 cycles/byte, before the first copy is delivered). Must tell different messages apart:
+    /// two messages with one key are delivered once. 0: no key, the whole text is hashed.
+    InplaceFunction<uint64_t(const WsMessage&), 32> dedup_key{};
 };
 
 /// N WebSocket sessions to one host, each on its own address where the host has enough of them.
@@ -112,18 +116,34 @@ public:
     SendStatus send(std::size_t session, std::string_view text) { return members_[session]->ws.send_text(text); }
 
     /// On the open session with the lowest ping RTT (unmeasured ones last); NotOpen if none is.
+    /// If that session can't take the frame (WouldBlock: its queue is full, nothing was queued) the
+    /// next one in RTT order is tried, and so on. Any other result is final: Dropped means the
+    /// connection failed while the frame was being written, so the venue may have it, and sending
+    /// it again elsewhere could duplicate the order.
     SendStatus send_best(std::string_view text) {
-        Session* best = nullptr;
-        int64_t best_rtt = std::numeric_limits<int64_t>::max();
-        for (auto& m : members_) {
-            if (!m->ws.is_open()) continue;
-            const int64_t rtt = m->ws.last_rtt_ns() > 0 ? m->ws.last_rtt_ns() : std::numeric_limits<int64_t>::max() - 1;
-            if (best == nullptr || rtt < best_rtt) {
-                best = &m->ws;
-                best_rtt = rtt;
+        constexpr std::size_t kMaxTried = 64;
+        bool tried[kMaxTried] = {};
+        bool any_would_block = false;
+        for (;;) {
+            Session* best = nullptr;
+            std::size_t best_i = 0;
+            int64_t best_rtt = std::numeric_limits<int64_t>::max();
+            for (std::size_t i = 0; i < members_.size(); ++i) {
+                Session& ws = members_[i]->ws;
+                if ((i < kMaxTried && tried[i]) || !ws.is_open()) continue;
+                const int64_t rtt = ws.last_rtt_ns() > 0 ? ws.last_rtt_ns() : std::numeric_limits<int64_t>::max() - 1;
+                if (best == nullptr || rtt < best_rtt) {
+                    best = &ws;
+                    best_i = i;
+                    best_rtt = rtt;
+                }
             }
+            if (best == nullptr) return any_would_block ? SendStatus::WouldBlock : SendStatus::NotOpen;
+            const SendStatus r = best->send_text(text);
+            if (r != SendStatus::WouldBlock || best_i >= kMaxTried) return r;
+            tried[best_i] = true;
+            any_would_block = true;
         }
-        return best == nullptr ? SendStatus::NotOpen : best->send_text(text);
     }
 
     [[nodiscard]] std::size_t size() const noexcept { return members_.size(); }
@@ -159,7 +179,9 @@ private:
             if (on_message_) on_message_(m, i);
             return;
         }
-        const auto seen = dedup_.first(std::hash<std::string_view>{}(m.text()), m.recv_ns);
+        uint64_t key = opts_.dedup_key ? opts_.dedup_key(m) : 0;
+        if (key == 0) key = std::hash<std::string_view>{}(m.text());
+        const auto seen = dedup_.first(key, m.recv_ns);
         Member& mem = *members_[i];
         mem.delay_ns += opts_.delay_ema_alpha * (static_cast<double>(m.recv_ns - seen.first_ns) - mem.delay_ns);
         if (seen.first && on_message_) on_message_(m, i);

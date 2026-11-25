@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quark/Attributes.h"
+#include "quark/QuarkError.h"
 #include "quark/QuarkLog.h"
 #include "quark/net/BufferPool.h"
 #include "quark/net/Endpoint.h"
@@ -17,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -53,6 +55,10 @@ struct WsSessionOptions {
     int64_t pong_timeout_ns{0};                  ///< 0: pings without a deadline
     int64_t max_recv_gap_ns{0};                  ///< 0: no receive gap check
     int64_t close_timeout_ns{1'000'000'000};     ///< close(): how long queued frames may take to go out
+    /// Busy-poll mode: most bytes one step reads from this session (0: until the socket is empty), so a
+    /// burst on one feed can't hold the loop (other sessions, the step hook, timers); the next step
+    /// reads on. Ignored in epoll mode, where every edge must be drained.
+    std::size_t max_read_bytes_per_poll{0};
     /// Application-level ping (e.g. Bitget's "ping"): sent as a text frame instead of a Ping frame.
     std::string ping_text{};
     /// Reply to ping_text (e.g. "pong"): swallowed instead of delivered, and timed for last_rtt_ns().
@@ -116,7 +122,7 @@ public:
         : loop_{loop},
           recv_pool_{recv_pool},
           send_pool_{send_pool},
-          opts_{options},
+          opts_{checked(options)},
           backoff_{options.reconnect_initial_ns, options.reconnect_max_ns, 0.2, os_random_u64()},
           mask_gen_{os_random_u64()} {}
 
@@ -294,6 +300,13 @@ private:
     MessageHandler on_message_;
     StateHandler on_state_;
     EndpointProvider endpoint_provider_;
+
+    // Checked in every build type (ExpBackoff only assert()s them): a zero initial delay would
+    // reconnect every nanosecond. Throws QuarkError (fatal with QUARK_NO_EXCEPTIONS) at construction.
+    static const Options& checked(const Options& o) {
+        QUARK_ASSERT(o.reconnect_initial_ns > 0 && o.reconnect_max_ns >= o.reconnect_initial_ns);
+        return o;
+    }
 
     // ---------------------------------------------------------------- connection lifecycle
 
@@ -502,6 +515,9 @@ private:
     /// modes rely on.
     QUARK_ATTRIBUTE_HOT void read_input() {
         const uint32_t gen = conn_gen_;
+        // busy-poll: the next step reads on, so a burst can be split; an epoll edge must be drained
+        std::size_t budget = loop_.busy_poll() && opts_.max_read_bytes_per_poll > 0 ? opts_.max_read_bytes_per_poll
+                                                                                     : std::numeric_limits<std::size_t>::max();
         for (;;) {
             std::span<uint8_t> space = readable_space(recv_);
             if (space.empty() && recv_.headroom() > 0) {
@@ -513,6 +529,7 @@ private:
                 teardown(true, true);
                 return;
             }
+            if (space.size() > budget) space = space.first(budget);
             const sys::io_result n = transport_.read(space);
             if (n == -EAGAIN) return;
             loop_.note_work();
@@ -532,6 +549,10 @@ private:
             }
             parse_frames();
             if (gen != conn_gen_) return;  // torn down (maybe reconnected) while handling the input
+            if (budget != std::numeric_limits<std::size_t>::max()) {
+                budget -= static_cast<std::size_t>(n);
+                if (budget == 0) return;  // the next step reads on
+            }
         }
     }
 

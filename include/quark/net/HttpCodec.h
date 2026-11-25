@@ -157,16 +157,34 @@ inline std::string_view HttpResponseView::header(std::string_view name) const no
     return {};
 }
 
+/// Most 1xx interim responses accepted before the real one (each is skipped).
+inline constexpr int kMaxInterimResponses = 16;
+
+/// Where parse_http_response() stopped in a buffer that keeps growing (more bytes of the same
+/// response appended): passed back, the next call resumes there instead of rescanning from the
+/// start. Reset it (a new value) for each new response.
+struct HttpParseState {
+    std::size_t start{0};       ///< where the current (interim or final) response begins
+    std::size_t searched{0};    ///< bytes from `start` already searched for the end of its headers
+    std::size_t chunk_pos{0};   ///< chunked: the next chunk-size line to check, 0 until the headers are parsed
+    int interim{0};             ///< 1xx responses skipped so far
+};
+
 /// Parses an HTTP/1.1 response at the start of `buf`: Content-Length, chunked or (see
-/// close_delimited) close-delimited bodies; 1xx interim responses before it are skipped.
-/// Returns complete == false while more bytes are needed. A chunked body is decoded in place
-/// (the decoded body is never longer than its encoding), only once all chunks are present.
-[[nodiscard]] inline QUARK_ATTRIBUTE_HOT HttpResponseView parse_http_response(std::span<uint8_t> buf) noexcept {
+/// close_delimited) close-delimited bodies; up to kMaxInterimResponses 1xx interim responses
+/// before it are skipped. Returns complete == false while more bytes are needed. A chunked body is
+/// decoded in place (the decoded body is never longer than its encoding), only once all chunks are
+/// present. `state` (optional): see HttpParseState.
+///
+/// Malformed (RFC 9112 6.3): conflicting Content-Lengths, Content-Length together with
+/// Transfer-Encoding, a Transfer-Encoding whose last coding isn't chunked, a status below 100,
+/// whitespace before a header's colon, obsolete line folding. 204 and 304 never have a body.
+[[nodiscard]] inline QUARK_ATTRIBUTE_HOT HttpResponseView parse_http_response(std::span<uint8_t> buf,
+                                                                              HttpParseState* state = nullptr) noexcept {
     HttpResponseView r;
+    HttpParseState local;
+    HttpParseState& st = state != nullptr ? *state : local;
     const std::string_view s{reinterpret_cast<const char*>(buf.data()), buf.size()};
-    const auto hdr_end = s.find("\r\n\r\n");
-    if (hdr_end == std::string_view::npos) return r;
-    const std::size_t body_start = hdr_end + 4;
 
     auto malformed = [&] {
         r.complete = true;
@@ -176,49 +194,93 @@ inline std::string_view HttpResponseView::header(std::string_view name) const no
         return r;
     };
 
-    const std::string_view status_line = s.substr(0, s.find("\r\n"));
-    if (!status_line.starts_with("HTTP/1.") || status_line.size() < 12 || status_line[8] != ' ' ||
-        (status_line.size() > 12 && status_line[12] != ' ')) {
-        return malformed();
-    }
-    for (std::size_t i = 9; i < 12; ++i) {
-        if (status_line[i] < '0' || status_line[i] > '9') return malformed();
-        r.status = r.status * 10 + (status_line[i] - '0');
-    }
-    if (r.status < 200) {
+    // the status line and headers of the final response, skipping interim ones
+    std::size_t hdr_end = 0;
+    std::string_view status_line;
+    for (;;) {
+        // resume a little before where the last search ended: "\r\n\r\n" may straddle it
+        const std::size_t from = st.start + (st.searched > 3 ? st.searched - 3 : 0);
+        hdr_end = from < s.size() ? s.find("\r\n\r\n", from) : std::string_view::npos;
+        if (hdr_end == std::string_view::npos) {
+            st.searched = s.size() - st.start;
+            return r;
+        }
+        status_line = s.substr(st.start, s.find("\r\n", st.start) - st.start);
+        if (!status_line.starts_with("HTTP/1.") || status_line.size() < 12 || status_line[8] != ' ' ||
+            (status_line.size() > 12 && status_line[12] != ' ')) {
+            return malformed();
+        }
+        r.status = 0;
+        for (std::size_t i = 9; i < 12; ++i) {
+            if (status_line[i] < '0' || status_line[i] > '9') return malformed();
+            r.status = r.status * 10 + (status_line[i] - '0');
+        }
+        if (r.status < 100) return malformed();
+        if (r.status >= 200) break;
         // interim response (100 Continue, 103 Early Hints): headers only, the real one follows
-        HttpResponseView next = parse_http_response(buf.subspan(body_start));
-        next.consumed += next.complete ? body_start : 0;
-        return next;
+        if (++st.interim > kMaxInterimResponses) return malformed();
+        st.start = hdr_end + 4;
+        st.searched = 0;
+        r.status = 0;  // an incomplete result reports no status, not the skipped interim one's
     }
+    const std::size_t body_start = hdr_end + 4;
+    const std::size_t line1_end = st.start + status_line.size() + 2;
     r.keep_alive = status_line.starts_with("HTTP/1.1");  // HTTP/1.0 closes by default
-    const std::size_t headers_start = std::min(status_line.size() + 2, hdr_end);
-    r.headers = s.substr(headers_start, hdr_end - headers_start);
+    r.headers = s.substr(std::min(line1_end, hdr_end), hdr_end - std::min(line1_end, hdr_end));
 
     bool chunked = false;
+    bool has_encoding = false;
     bool has_length = false;
     std::size_t content_len = 0;
-    for (std::size_t pos = status_line.size() + 2; pos < hdr_end;) {
+    for (std::size_t pos = line1_end; pos < hdr_end;) {
         const std::size_t eol = s.find("\r\n", pos);
         const std::string_view line = s.substr(pos, eol - pos);
-        if (detail::istarts_with(line, "content-length:")) {
-            content_len = detail::parse_decimal(detail::trim(line.substr(15)));
-            if (content_len == detail::kBadNumber) return malformed();
-            has_length = true;
-        } else if (detail::istarts_with(line, "transfer-encoding:")) {
-            // chunked must be the last coding, or the length is unknown (RFC 9112 6.3)
-            if (!detail::iends_with(detail::trim(line.substr(18)), "chunked")) return malformed();
-            chunked = true;
-        } else if (detail::istarts_with(line, "connection:")) {
-            const std::string_view v = detail::trim(line.substr(11));
-            if (detail::istarts_with(v, "close")) r.keep_alive = false;
-            if (detail::istarts_with(v, "keep-alive")) r.keep_alive = true;
-        }
         pos = eol + 2;
+        if (line.front() == ' ' || line.front() == '\t') return malformed();  // obsolete line folding
+        const std::size_t colon = line.find(':');
+        if (colon == std::string_view::npos || colon == 0 || line[colon - 1] == ' ' || line[colon - 1] == '\t') {
+            return malformed();  // no field name, or whitespace before the colon
+        }
+        const std::string_view name = line.substr(0, colon);
+        const std::string_view value = detail::trim(line.substr(colon + 1));
+        if (detail::header_name_equal(name, "content-length")) {
+            const std::size_t len = detail::parse_decimal(value);
+            if (len == detail::kBadNumber || (has_length && len != content_len)) return malformed();
+            content_len = len;
+            has_length = true;
+        } else if (detail::header_name_equal(name, "transfer-encoding")) {
+            // the last coding must be chunked, or the length is unknown
+            const std::size_t comma = value.rfind(',');
+            const std::string_view last = detail::trim(comma == std::string_view::npos ? value : value.substr(comma + 1));
+            if (!detail::header_name_equal(last, "chunked")) return malformed();
+            chunked = true;
+            has_encoding = true;
+        } else if (detail::header_name_equal(name, "connection")) {
+            bool close = false, keep = false;
+            for (std::string_view rest = value; !rest.empty();) {
+                const std::size_t c = rest.find(',');
+                const std::string_view token = detail::trim(rest.substr(0, c));
+                rest = c == std::string_view::npos ? std::string_view{} : rest.substr(c + 1);
+                close |= detail::header_name_equal(token, "close");
+                keep |= detail::header_name_equal(token, "keep-alive");
+            }
+            if (close) {
+                r.keep_alive = false;
+            } else if (keep) {
+                r.keep_alive = true;
+            }
+        }
+    }
+    if (has_length && has_encoding) return malformed();  // which one frames it? (response splitting)
+
+    if (r.status == 204 || r.status == 304) {  // never a body (RFC 9110 15.3.5, 15.4.5)
+        r.complete = true;
+        r.consumed = body_start;
+        return r;
     }
 
     if (!chunked) {
-        if (!has_length && r.status != 204 && r.status != 304) {
+        if (!has_length) {
             r.close_delimited = true;
             r.keep_alive = false;
             r.body = {buf.data() + body_start, buf.size() - body_start};
@@ -231,10 +293,12 @@ inline std::string_view HttpResponseView::header(std::string_view name) const no
         return r;
     }
 
-    // dry run: are all chunks present? (decoding in place is destructive)
-    std::size_t rp = body_start;
+    // dry run: are all chunks present? (decoding in place is destructive). Chunks checked by an
+    // earlier call (st.chunk_pos) are not checked again.
+    std::size_t rp = st.chunk_pos != 0 ? st.chunk_pos : body_start;
     std::size_t end_of_message = 0;
     for (;;) {
+        st.chunk_pos = rp;
         const std::size_t line_end = s.find("\r\n", rp);
         if (line_end == std::string_view::npos) return r;
         const std::size_t size = detail::parse_chunk_size(s.substr(rp, line_end - rp));
