@@ -19,7 +19,7 @@
 #define QUARK_API __attribute__((visibility("default")))
 
 constexpr inline int QUARK_VERSION_MAJOR{1};
-constexpr inline int QUARK_VERSION_MINOR{2};
+constexpr inline int QUARK_VERSION_MINOR{3};
 constexpr inline int QUARK_VERSION_PATCH{0};
 
 QUARK_BEGIN_NAMESPACE

@@ -4,7 +4,7 @@ All notable changes to quark are listed here. quark follows [semantic versioning
 the major version changes with incompatible API or ABI changes, so `find_package(quark 1.0)` accepts
 any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
-## [Unreleased]
+## [1.3.0]
 
 ### Changed
 
