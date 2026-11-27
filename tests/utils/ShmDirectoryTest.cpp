@@ -92,9 +92,12 @@ TEST_F(TestShmDirectory, ScanErrorsAreReportedNotTakenForNoClients) {
 
     rlimit saved{};
     ::getrlimit(RLIMIT_NOFILE, &saved);
-    int used = 0;
-    for (int fd = 0; fd < 4096; ++fd) used += ::fcntl(fd, F_GETFD) != -1;
-    const rlimit full{static_cast<rlim_t>(used), saved.rlim_max};  // no fd left: EMFILE
+    // open() takes the lowest free fd and fails with EMFILE when that one is >= the limit. Counting
+    // the open fds instead isn't enough: with a gap below the highest one (fds the parent left open,
+    // e.g. an IDE or CI runner), the count is below the lowest free fd and the scan still succeeds.
+    int lowest_free = 0;
+    while (::fcntl(lowest_free, F_GETFD) != -1) ++lowest_free;
+    const rlimit full{static_cast<rlim_t>(lowest_free), saved.rlim_max};  // no fd left: EMFILE
     ASSERT_EQ(::setrlimit(RLIMIT_NOFILE, &full), 0);
     const auto scanned = sessions.alive();
     const Liveness live = sessions.liveness("algo_a");
