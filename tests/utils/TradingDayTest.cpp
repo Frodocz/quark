@@ -1,6 +1,8 @@
 #include "quark/utils/DateTime.h"
 #include "quark/utils/RdtscClock.h"
 #include "gtest/gtest.h"
+#include <limits>
+#include <random>
 
 using quark::Date;
 using quark::RdtscClock;
@@ -541,24 +543,51 @@ TEST_F(TestTradingDay, StructLayout) {
     EXPECT_EQ(sizeof(TradingDay), 40u);
 }
 
-// ---- init() contract: negative timestamps are rejected, 0 is valid ------
-TEST_F(TestTradingDay, InitRejectsNegativeTimestamp) {
+// ---- init() contract (TIME-05): any instant whose surrounding day starts fit in int64 ----------
+// Before 1970 works like get_date() (floor); init(-1) used to fail and TradingDay(-1) left date 0.
+TEST_F(TestTradingDay, InitAcceptsInstantsBeforeTheEpoch) {
     TradingDay td;
-    EXPECT_FALSE(td.init(-1));
-    EXPECT_FALSE(td.init(std::numeric_limits<int64_t>::min()));
+    ASSERT_TRUE(td.init(-1));
+    EXPECT_EQ(19691231, td.get_curr_date().to_int_date());
+    EXPECT_EQ(-quark::kNsPerDay, td.get_curr_sod_ns());
+    EXPECT_EQ(0, td.get_next_sod_ns());
+    EXPECT_EQ(-2 * quark::kNsPerDay, td.get_prev_sod_ns());
     EXPECT_TRUE(td.init(0));
+    EXPECT_EQ(19700101, td.get_curr_date().to_int_date());
 }
- 
-TEST_F(TestTradingDay, FailedInitLeavesStateUnchanged) {
+
+TEST_F(TestTradingDay, ConstructorBeforeTheEpoch) {
+    const TradingDay td(-quark::kNsPerDay - 1);
+    EXPECT_EQ(19691230, td.get_curr_date().to_int_date());
+    EXPECT_EQ(-2 * quark::kNsPerDay, td.get_curr_sod_ns());
+}
+
+// The previous and next day's start must fit in int64 too: near the limits they would overflow (UB)
+TEST_F(TestTradingDay, InitRefusesInstantsWhoseDayStartsOverflow) {
     TradingDay td(ns(kSod_20211108 + 100));
-    EXPECT_FALSE(td.init(-5));
-    expect_consistent(td, 20211108);
+    EXPECT_FALSE(td.init(std::numeric_limits<int64_t>::min()));
+    EXPECT_FALSE(td.init(std::numeric_limits<int64_t>::max()));
+    expect_consistent(td, 20211108);  // a refused init() leaves the state unchanged
 }
- 
-TEST_F(TestTradingDay, FailedConstructorInitLeavesDefaultState) {
-    TradingDay td(-1);
+
+TEST_F(TestTradingDay, OutOfRangeConstructorLeavesDefaultState) {
+    const TradingDay td(std::numeric_limits<int64_t>::min());
     EXPECT_EQ(0, td.get_curr_sod_ns());
     EXPECT_EQ(0, td.get_curr_date().to_int_date());
+}
+
+TEST_F(TestTradingDay, AgreesWithGetDateBeforeAndAfterTheEpoch) {
+    std::mt19937_64 rng(5);
+    std::uniform_int_distribution<int64_t> any(-9'000'000'000'000'000'000LL, 9'000'000'000'000'000'000LL);
+    for (int i = 0; i < 100'000; ++i) {
+        const int64_t t = i % 3 == 0 ? (any(rng) / quark::kNsPerDay) * quark::kNsPerDay - i % 2 : any(rng);  // incl. midnights
+        TradingDay td;
+        ASSERT_TRUE(td.init(t)) << t;
+        ASSERT_EQ(td.get_curr_date(), TradingDay::get_date(t)) << t;
+        ASSERT_LE(td.get_curr_sod_ns(), t) << t;
+        ASSERT_GT(td.get_next_sod_ns(), t) << t;
+        ASSERT_EQ(td.get_next_sod_ns() - td.get_curr_sod_ns(), quark::kNsPerDay);
+    }
 }
 
 // ---- Pre-1970 handling (reachable via -= and the static helpers) --------

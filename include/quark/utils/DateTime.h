@@ -124,8 +124,12 @@ QUARK_API std::ostream& operator<<(std::ostream& os, const Date& date);
 class QUARK_API TradingDay {
 public:
     constexpr TradingDay() = default;
+    /// The UTC day holding `now_ns` (before 1970 too); the default state if out of range (see init()).
     explicit TradingDay(int64_t now_ns) { init(now_ns); }
 
+    /// The UTC day holding `now_ns`, before 1970 too (floor, like get_date()). False, and nothing
+    /// changed, only within a day of the int64 limits (about 1677-09-22 and 2262-04-10), where the
+    /// surrounding day starts don't fit.
     bool init(int64_t now_ns) noexcept;
 
     Date get_prev_date() const noexcept { return previous_date_; }

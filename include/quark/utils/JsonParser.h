@@ -24,6 +24,8 @@ QUARK_BEGIN_NAMESPACE
 // Each returns simdjson's result type so this compiles with and without exceptions: check error(), or
 // with exceptions convert to ondemand::document, which throws on error. The document is valid until the
 // next parse, and a parse_in_place document also points into the caller's buffer.
+// One parser per thread, constructed once (see the constructor): it is not thread-safe, and
+// constructing it is expensive by design.
 class QUARK_API JsonParser {
 public:
     static constexpr size_t kInitialCapacity = 64 * 1024; // 64KB
@@ -32,6 +34,13 @@ public:
     // Preallocates the copy buffer and simdjson's internal buffers for documents up to
     // initial_capacity bytes and touches them, so the hot path neither allocates nor page-faults.
     // Larger documents still parse, and both buffers grow to fit them.
+    //
+    // Construct once and reuse: this is a start-up cost that grows with initial_capacity (about
+    // 1.5 us at 1 KB, 95 us at 64 KB, 1.7 ms at 1 MB, generic x86-64 build), and it allocates. Don't
+    // construct a JsonParser per message or per REST response: keep one per connection or venue
+    // (a member) and call parse_copy / parse_in_place on it; a reused parser reads a 500-byte order
+    // response in ~150 ns where a new JsonParser(1024) per response costs ~1.8 us
+    // (benchmarks/utils/UtilsBench.cpp, BM_JsonParsePerResponse*).
     explicit JsonParser(size_t initial_capacity = kInitialCapacity) {
         // parser first: it rejects sizes above its max capacity before json_buf_ reserves anything
         if (auto err = json_parser_.allocate(initial_capacity); err != simdjson::SUCCESS) {

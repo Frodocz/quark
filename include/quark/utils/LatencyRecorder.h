@@ -24,12 +24,17 @@ public:
 
     [[nodiscard]] const LatencyHistogram& histogram(std::size_t stage) const noexcept { return histograms_[stage]; }
 
-    QUARK_ATTRIBUTE_COLD void report(std::string_view who) {
+    // `who` only goes to the log: unused with QUARK_ENABLE_LOGGER=OFF
+    QUARK_ATTRIBUTE_COLD void report([[maybe_unused]] std::string_view who) {
         for (std::size_t i = 0; i < N; ++i) {
             LatencyHistogram& h = histograms_[i];
             if (h.count() == 0) continue;
             QUARK_LOG_INFO("latency {} {}: n={} p50={:.1f} p99={:.1f} p99.9={:.1f} max={:.1f} us", who, names_[i], h.count(),
                            us(h.percentile(50)), us(h.percentile(99)), us(h.percentile(99.9)), us(h.max()));
+            if (h.negative_count() != 0) [[unlikely]] {
+                QUARK_LOG_WARN("latency {} {}: {} negative samples recorded as 0 (stamps from different clocks?)", who,
+                               names_[i], h.negative_count());
+            }
             h.reset();
         }
     }

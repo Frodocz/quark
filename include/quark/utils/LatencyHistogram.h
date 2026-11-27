@@ -30,8 +30,13 @@ public:
     static constexpr int kSubBuckets = 1 << kSubBucketBits;
     static constexpr int kBuckets = (64 - kSubBucketBits) * kSubBuckets + kSubBuckets;
 
+    /// A negative value (stamps from two different clocks, or a clock going back) is recorded as 0
+    /// and counted: negative_count().
     QUARK_ALWAYS_INLINE void record(int64_t value) noexcept {
-        if (value < 0) value = 0;
+        if (value < 0) [[unlikely]] {
+            value = 0;
+            ++negative_;
+        }
         ++counts_[index_of(static_cast<uint64_t>(value))];
         ++count_;
         sum_ += static_cast<double>(value);
@@ -65,6 +70,8 @@ public:
     }
 
     [[nodiscard]] uint64_t count() const noexcept { return count_; }
+    /// Samples that were negative (recorded as 0): any is a measurement error, not a latency.
+    [[nodiscard]] uint64_t negative_count() const noexcept { return negative_; }
     [[nodiscard]] int64_t min() const noexcept { return count_ ? min_ : 0; }
     [[nodiscard]] int64_t max() const noexcept { return count_ ? max_ : 0; }
     [[nodiscard]] double mean() const noexcept { return count_ ? sum_ / static_cast<double>(count_) : 0; }
@@ -72,6 +79,7 @@ public:
     QUARK_ATTRIBUTE_COLD void merge(const BasicLatencyHistogram& other) noexcept {
         for (int i = 0; i < kBuckets; ++i) counts_[i] += other.counts_[i];
         count_ += other.count_;
+        negative_ += other.negative_;
         sum_ += other.sum_;
         if (other.count_) {
             if (other.min_ < min_) min_ = other.min_;
@@ -83,6 +91,7 @@ public:
     void reset() noexcept {
         counts_.fill(0);
         count_ = 0;
+        negative_ = 0;
         sum_ = 0;
         min_ = std::numeric_limits<int64_t>::max();
         max_ = 0;
@@ -91,6 +100,7 @@ public:
 private:
     std::array<uint64_t, kBuckets> counts_{};
     uint64_t count_{0};
+    uint64_t negative_{0};
     double sum_{0};
     int64_t min_{std::numeric_limits<int64_t>::max()};
     int64_t max_{0};

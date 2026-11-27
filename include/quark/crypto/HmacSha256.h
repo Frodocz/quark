@@ -22,7 +22,8 @@ public:
     static constexpr std::size_t kDigestSize = 32;
     using Digest = std::array<uint8_t, kDigestSize>;
 
-    /// Throws QuarkError on an empty key or an OpenSSL failure.
+    /// Throws QuarkError on an empty key or an OpenSSL failure. The sign functions throw QuarkError on a
+    /// moved-from object (a fatal error with QUARK_NO_EXCEPTIONS).
     explicit HmacSha256(std::string_view key);
     ~HmacSha256();
 

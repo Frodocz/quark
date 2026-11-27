@@ -6,6 +6,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <string>
 #include <thread>
 
 using namespace quark;
@@ -97,12 +99,55 @@ TEST(TestSteadyTscClock, FollowsTheMonotonicRate) {
 TEST(TestSteadyTscClock, ImplausibleRateSamplesAreIgnored) {
     Sim s;
     for (int i = 0; i < 5; ++i) s.second();
-    const double rate = s.clock.ns_per_tsc();
+    const double rate = s.clock.monotonic_ns_per_tsc();
     s.tsc += 1'000'000'000;
     s.real += 1'100'000'000;  // monotonic says 10% more time passed than the TSC: not a plausible rate
     s.mono += 1'100'000'000;
     s.clock.update(s.tsc, s.real, s.mono);
-    EXPECT_NEAR(s.clock.ns_per_tsc(), rate, 1e-3);
+    EXPECT_NEAR(s.clock.monotonic_ns_per_tsc(), rate, 1e-9);  // the rate estimate is kept...
+    EXPECT_LE(s.clock.ns_per_tsc(), rate * (1 + detail::SteadyTscClock::kMaxSlew) + 1e-12);  // ...the offset still corrected, bounded
+}
+
+// TIME-04: a rate change that lasts (a VM on another host, a TSC that isn't invariant) used to be
+// rejected forever as "implausible": the rate froze and the offset grew without bound (2%: -11.8 s
+// after 10 min). It is adopted once a few consecutive samples agree.
+TEST(TestSteadyTscClock, LastingRateChangeIsAdopted) {
+    Sim s;
+    for (int i = 0; i < 10; ++i) s.second();
+    int64_t worst = 0;
+    for (int i = 0; i < 600; ++i) {
+        s.second(1'000'000'000, 1.02);  // from now on 1 TSC tick is 1.02 ns of real time
+        if (i == 5) {
+            EXPECT_NEAR(s.clock.monotonic_ns_per_tsc(), 1.02, 1e-6) << "adopted within a few samples";
+        }
+        worst = std::max<int64_t>(worst, std::llabs(s.now() - s.real));
+    }
+    EXPECT_LT(worst, 200'000'000);                  // bounded: ~0.1 s while confirming, then caught up
+    EXPECT_LE(std::llabs(s.now() - s.real), 1'000);  // and back within 1 us of the wall clock
+}
+
+// Isolated outliers (a sampling thread descheduled now and then) must still not bend the rate
+TEST(TestSteadyTscClock, AlternatingOutliersAreNotAdopted) {
+    Sim s;
+    for (int i = 0; i < 10; ++i) s.second();
+    for (int i = 0; i < 100; ++i) {
+        s.second(1'000'000'000, i % 2 == 0 ? 1.10 : 1.0);
+    }
+    EXPECT_NEAR(s.clock.monotonic_ns_per_tsc(), 1.0, 1e-3);
+}
+
+// TIME-09: everything here assumes an invariant TSC (constant rate, also in deep C-states)
+TEST(TestRdtscClock, ReportsWhetherTheTscIsInvariant) {
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    std::string line;
+    bool constant = false, nonstop = false;
+    while (std::getline(cpuinfo, line)) {
+        if (line.rfind("flags", 0) != 0) continue;
+        constant = line.find(" constant_tsc") != std::string::npos;
+        nonstop = line.find(" nonstop_tsc") != std::string::npos;
+        break;
+    }
+    EXPECT_EQ(RdtscClock::invariant_tsc(), constant && nonstop);
 }
 
 TEST(TestRdtscClock, SteadyClockIsMonotonicAndCloseToTheWallClock) {

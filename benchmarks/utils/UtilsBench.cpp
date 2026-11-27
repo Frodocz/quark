@@ -1,6 +1,7 @@
 // Building blocks used on every step or message: timers, arena allocation, inline callables,
 // clocks, byte order, JSON parsing, the circular buffer.
 #include "quark/utils/CircularBuffer.h"
+#include "quark/utils/Crc32c.h"
 #include "quark/utils/HwEndian.h"
 #include "quark/utils/InplaceFunction.h"
 #include "quark/utils/JsonParser.h"
@@ -153,6 +154,20 @@ void BM_LoadBe64(benchmark::State& state) {
 }
 BENCHMARK(BM_LoadBe64);
 
+// ------------------------------------------------------------------ Crc32c
+
+// one checksum per Journal record: record-sized inputs, so the per-call overhead (CPU dispatch) shows
+void BM_Crc32c(benchmark::State& state) {
+    std::vector<uint8_t> buf(static_cast<std::size_t>(state.range(0)), 0x5a);
+    uint32_t crc = 0;
+    for (auto _ : state) {
+        crc = crc32c(buf.data(), buf.size(), crc);
+        benchmark::DoNotOptimize(crc);
+    }
+    state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * buf.size()));
+}
+BENCHMARK(BM_Crc32c)->Arg(16)->Arg(64)->Arg(256);
+
 // ------------------------------------------------------------------ JSON
 
 // a trade message, the common market data case
@@ -191,6 +206,47 @@ void BM_JsonParseDepthSnapshot(benchmark::State& state) {
     state.SetBytesProcessed(static_cast<int64_t>(state.iterations() * json.size()));
 }
 BENCHMARK(BM_JsonParseDepthSnapshot);
+
+// Construction preallocates and pre-faults buffers for `capacity` bytes: a cost meant to be paid
+// once, at start-up (PARSE-01).
+void BM_JsonParserConstruct(benchmark::State& state) {
+    for (auto _ : state) {
+        JsonParser parser(static_cast<std::size_t>(state.range(0)));
+        benchmark::DoNotOptimize(&parser);
+    }
+}
+BENCHMARK(BM_JsonParserConstruct)->Arg(1 << 10)->Arg(64 << 10)->Arg(1 << 20)->Unit(benchmark::kMicrosecond);
+
+// a REST order-query response (Binance USDM shape)
+const std::string kOrderResponse =
+    R"({"orderId":1234567890,"symbol":"BTCUSDT","status":"FILLED","clientOrderId":"abc123def456",)"
+    R"("price":"16573.10","avgPrice":"16573.10000","origQty":"0.003","executedQty":"0.003",)"
+    R"("cumQuote":"49.71930","timeInForce":"GTC","type":"LIMIT","reduceOnly":false,"closePosition":false,)"
+    R"("side":"BUY","positionSide":"BOTH","stopPrice":"0","workingType":"CONTRACT_PRICE",)"
+    R"("priceProtect":false,"origType":"LIMIT","time":1672515782136,"updateTime":1672515782136})";
+
+int64_t read_order_id(JsonParser& parser, const std::string& body) {
+    auto doc = parser.parse_copy(body);
+    int64_t id = 0;
+    if (doc["orderId"].get_int64().get(id) != simdjson::SUCCESS) id = -1;
+    return id;
+}
+
+// anti-pattern: a parser constructed per response, as in a handler with a local JsonParser json(1024)
+void BM_JsonParsePerResponseNewParser(benchmark::State& state) {
+    for (auto _ : state) {
+        JsonParser parser(1024);
+        benchmark::DoNotOptimize(read_order_id(parser, kOrderResponse));
+    }
+}
+BENCHMARK(BM_JsonParsePerResponseNewParser);
+
+// recommended: one parser per connection or venue, reused for every response
+void BM_JsonParsePerResponseReusedParser(benchmark::State& state) {
+    JsonParser parser(1024);
+    for (auto _ : state) benchmark::DoNotOptimize(read_order_id(parser, kOrderResponse));
+}
+BENCHMARK(BM_JsonParsePerResponseReusedParser);
 
 // ------------------------------------------------------------------ CircularBuffer
 

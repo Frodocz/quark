@@ -19,7 +19,6 @@
 #endif
 #include <openssl/crypto.h>
 
-#include <cassert>
 #include <cstring>
 
 QUARK_BEGIN_NAMESPACE
@@ -62,7 +61,9 @@ HmacSha256::HmacSha256(std::string_view key) : state_{std::make_unique<State>()}
 }
 
 HmacSha256::Digest HmacSha256::sign(std::string_view data) {
-    assert(state_ && "HmacSha256: moved from");
+    if (!state_) [[unlikely]] {
+        QUARK_THROW(QuarkError{"HmacSha256: sign on a moved-from object"});
+    }
     Digest out;
     unsigned char inner_hash[kDigestSize];
     SHA256_CTX ctx = state_->inner;
@@ -105,6 +106,9 @@ HmacSha256::HmacSha256(std::string_view key) : state_{std::make_unique<State>()}
 }
 
 HmacSha256::Digest HmacSha256::sign(std::string_view data) {
+    if (!state_) [[unlikely]] {
+        QUARK_THROW(QuarkError{"HmacSha256: sign on a moved-from object"});
+    }
     Digest out;
     std::size_t len = 0;
     EVP_MAC_CTX* ctx = ::EVP_MAC_CTX_dup(state_->keyed);

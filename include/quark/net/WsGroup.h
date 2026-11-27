@@ -181,9 +181,12 @@ private:
         }
         uint64_t key = opts_.dedup_key ? opts_.dedup_key(m) : 0;
         if (key == 0) key = std::hash<std::string_view>{}(m.text());
-        const auto seen = dedup_.first(key, m.recv_ns);
+        // the loop's clock (never jumps), not m.recv_ns (wall time): a system clock step would expire the
+        // window at once (letting late copies through) or stretch it. Delays resolve to one loop step.
+        const int64_t now = loop_.now_ns();
+        const auto seen = dedup_.first(key, now);
         Member& mem = *members_[i];
-        mem.delay_ns += opts_.delay_ema_alpha * (static_cast<double>(m.recv_ns - seen.first_ns) - mem.delay_ns);
+        mem.delay_ns += opts_.delay_ema_alpha * (static_cast<double>(now - seen.first_ns) - mem.delay_ns);
         if (seen.first && on_message_) on_message_(m, i);
     }
 

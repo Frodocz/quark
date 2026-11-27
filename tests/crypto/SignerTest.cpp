@@ -110,6 +110,16 @@ TEST_F(TestHmacSha256, MoveAndEmptyKey) {
     QUARK_EXPECT_ERROR(HmacSha256(""), "HmacSha256: empty key");
 }
 
+// PARSE-03: a moved-from signer reports an error in Release too, instead of dereferencing null
+TEST_F(TestHmacSha256, SignAfterMoveIsAnError) {
+    HmacSha256 a("Jefe");
+    HmacSha256 b(std::move(a));
+    char hex[64];
+    QUARK_EXPECT_ERROR((void)a.sign("x"), "HmacSha256: sign on a moved-from object");      // NOLINT(bugprone-use-after-move)
+    QUARK_EXPECT_ERROR((void)a.sign_hex("x", hex), "HmacSha256: sign on a moved-from object");  // NOLINT(bugprone-use-after-move)
+    EXPECT_EQ(b.sign_hex("x", hex), 64u);
+}
+
 class TestEd25519Signer : public ::testing::Test {};
 
 // RFC 8032 section 7.1, TEST 1 (empty message) and TEST 2

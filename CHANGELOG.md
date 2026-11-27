@@ -8,6 +8,18 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Changed
 
+- `TradingDay::init()` and `TradingDay(int64_t)` accept instants before 1970 (floor, like `get_date()`); they
+  used to refuse them, and the constructor then silently left date 0. `init()` now returns false only within
+  a day of the int64 limits, where the previous/next day's start would overflow (it did, for INT64_MAX).
+- `SlidingWindowLimiter` refuses a window <= 0 and a limit of 0 or UINT32_MAX at construction (QuarkError,
+  fatal with `QUARK_NO_EXCEPTIONS`; they were only `assert()`ed). `try_acquire(now, 0)` succeeds and takes nothing.
+- WsGroup's dedup window and delay measurement run on the loop's clock (`EventLoop::now_ns()`), so a
+  system clock step can't expire the window (letting late copies through) or stretch it.
+- `init_log()` warns when the CPU reports no invariant TSC or the kernel clocksource isn't `tsc`.
+- `HmacSha256::sign()` / `sign_hex()` / `sign_base64()` on a moved-from object throw QuarkError (fatal with
+  `QUARK_NO_EXCEPTIONS`) instead of dereferencing null in Release builds (it was only `assert()`ed).
+- `JsonParser` documents that construction is a start-up cost (about 1.5 us at 1 KB, 95 us at 64 KB, 1.7 ms
+  at 1 MB): keep one parser and reuse it, don't construct one per message or REST response.
 - `EventLoop::now_ns()` (and so every TimerQueue deadline, HttpClient timeout and WsSession liveness check)
   is `RdtscClock::steady_ns()` instead of `tscns()`: still nanoseconds since the epoch, but a step of the
   system clock no longer jumps it (with `tscns()`, a 30 s forward step made every deadline under 30 s fire
@@ -35,6 +47,9 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Added
 
+- `RdtscClock::invariant_tsc()`: whether the CPU reports an invariant TSC (CPUID 0x80000007 EDX[8]).
+- `LatencyHistogram::negative_count()`: negative samples (stamps from two clocks, or a clock going back) are
+  still recorded as 0 but counted; `LatencyRecorder::report()` warns about them.
 - `RdtscClock::steady_ns()`: TSC time on a timebase that never jumps; its rate follows `CLOCK_MONOTONIC`
   and any offset from the system clock (after a step) is caught up at most 0.5% faster or slower. Same
   cost as `tscns()` (one `rdtsc`, ~10 ns); kept calibrated by the same `calibrate()` (every second).
@@ -55,6 +70,13 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Fixed
 
+- `RdtscClock::steady_ns()` froze its rate on a lasting TSC rate change of more than 1% (a sample "too far"
+  from the current rate was always rejected) and then drifted from wall time without bound (2%: -11.8 s
+  after 10 min). A change confirmed by consecutive samples is adopted, and the offset is always corrected.
+- `SlidingWindowLimiter::try_acquire()`: `units` near UINT32_MAX wrapped the "fits" check and were taken;
+  `units` of 0 filled the window with empty entries until every acquire failed.
+- The `QUARK_ENABLE_LOGGER=OFF` build failed with unused-parameter/-variable errors (LatencyRecorder.h,
+  QuarkLog.cpp).
 - `HttpClient::request()` returned `Ok` after the connection had failed inside it and `on_error` had
   already run: callers that set "busy" on `Ok` stayed busy forever. Such a failure is now reported by
   `on_error` after `request()` returns (an `Ok` request always gets exactly one later callback).

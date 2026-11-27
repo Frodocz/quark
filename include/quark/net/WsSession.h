@@ -33,6 +33,7 @@ enum class WsSendStatus : uint8_t { Ok, WouldBlock, NotOpen, TooLarge, Dropped }
 
 /// A received text or binary message, valid only during the on_message callback.
 struct WsMessage {
+    // >= simdjson::SIMDJSON_PADDING for in-place JSON parsing (static_assert in tests/utils/JsonParserTest.cpp)
     static constexpr std::size_t kPadding = 64;
 
     WsOpcode opcode;

@@ -127,3 +127,20 @@ TYPED_TEST(TestLatencyHistogram, ResetNeedsNoStackSpace) {
     h->record(7);
     EXPECT_EQ(h->min(), 7);
 }
+
+// TIME-07: a negative latency means the two stamps came from different clocks (or one went back): it is
+// still recorded as 0, but counted, so a report can show the measurement is broken
+TYPED_TEST(TestLatencyHistogram, NegativeSamplesAreCounted) {
+    auto a = std::make_unique<TypeParam>();
+    a->record(-5);
+    a->record(3);
+    EXPECT_EQ(a->count(), 2u);
+    EXPECT_EQ(a->negative_count(), 1u);
+    EXPECT_EQ(a->min(), 0);
+    auto b = std::make_unique<TypeParam>();
+    b->record(-1);
+    b->merge(*a);
+    EXPECT_EQ(b->negative_count(), 2u);
+    b->reset();
+    EXPECT_EQ(b->negative_count(), 0u);
+}

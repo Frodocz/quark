@@ -9,6 +9,7 @@
 #include "quill/sinks/NullSink.h"
 #include "quill/sinks/RotatingFileSink.h"
 
+#include <fstream>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -349,11 +350,23 @@ bool init_log(const LogConfig& config) {
     if (backend_taken) {
         QUARK_LOG_WARN("init_log(): the quill backend was already started elsewhere, [log] backend options ignored");
     }
-    for (const auto& name : created_early) {
+    for ([[maybe_unused]] const auto& name : created_early) {
         QUARK_LOG_WARN("init_log(): logger {} was created before init_log(), only its level is applied", name);
     }
     QUARK_LOG_INFO("quark logging initialized: manual_backend={} loggers={}", config.backend.manual_backend,
                    config.loggers.size());
+    // quark's timing (tscns, steady_ns, EventLoop deadlines) assumes a constant-rate TSC
+    if (!RdtscClock::invariant_tsc()) {
+        QUARK_LOG_WARN("the CPU reports no invariant TSC: RdtscClock times may drift or jump on this host");
+    }
+    if (std::ifstream cs{"/sys/devices/system/clocksource/clocksource0/current_clocksource"}; cs) {
+        std::string source;
+        cs >> source;
+        if (!source.empty() && source != "tsc") {
+            QUARK_LOG_WARN("the kernel clocksource is {}, not tsc: the kernel doesn't trust this TSC, RdtscClock times may drift",
+                           source);
+        }
+    }
     return true;
 }
 

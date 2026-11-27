@@ -1,4 +1,5 @@
 #include "quark/utils/JsonParser.h"
+#include "quark/net/WsSession.h"
 
 #include <gtest/gtest.h>
 
@@ -16,6 +17,13 @@
 namespace {
 
 using quark::JsonParser;
+
+// PARSE-02: WsMessage payloads are parsed in place (market data), so the receive buffer's spare
+// bytes must cover simdjson's padding. WsSession.h hard-codes its padding to stay free of simdjson;
+// a simdjson upgrade that raises SIMDJSON_PADDING fails here instead of failing every parse at run
+// time with INSUFFICIENT_PADDING.
+static_assert(quark::net::WsMessage::kPadding >= JsonParser::kPadding,
+              "raise WsMessage::kPadding (WsSession.h) to simdjson::SIMDJSON_PADDING");
 
 // Overloads that would leave the document dangling or are ambiguous must not compile
 template <typename T>
