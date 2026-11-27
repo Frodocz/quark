@@ -3,9 +3,13 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <sys/resource.h>
+#include <sys/utsname.h>
+#include <sys/vfs.h>
+#include <unistd.h>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -128,6 +132,27 @@ long thread_minor_faults() {
     ::getrusage(RUSAGE_THREAD, &u);
     return u.ru_minflt;
 }
+
+std::string first_line(const char* file) {
+    std::ifstream in{file};
+    std::string line;
+    std::getline(in, line);
+    return in || !line.empty() ? line : "?";
+}
+
+// What decides whether prefaulted pages stay writable, for the failure message: the faults depend on
+// the kernel and the filesystem holding the journal (TMPDIR), not on quark alone.
+std::string fault_environment(const std::string& path) {
+    utsname u{};
+    ::uname(&u);
+    struct statfs fs {};
+    char fs_type[32] = "?";
+    if (::statfs(path.c_str(), &fs) == 0) std::snprintf(fs_type, sizeof(fs_type), "0x%lx", static_cast<unsigned long>(fs.f_type));
+    return std::string{"kernel "} + u.release + ", journal " + path + " on filesystem type " + fs_type +
+           " (0xef53 ext4, 0x1021994 tmpfs, 0x58465342 xfs, 0x9123683e btrfs, 0x794c7630 overlayfs)" +
+           ", numa_balancing " + first_line("/proc/sys/kernel/numa_balancing") +
+           ", THP " + first_line("/sys/kernel/mm/transparent_hugepage/enabled") + ", euid " + std::to_string(::geteuid());
+}
 }  // namespace
 
 // A file-backed shared mapping is write-protected until each page's first write, also when mlock'ed,
@@ -143,13 +168,13 @@ TEST_F(TestJournal, AppendsWithinThePrefaultWindowDoNotFault) {
     const std::string rec(100, 'x');
     long faults = thread_minor_faults();
     for (int i = 0; i < 10'000; ++i) ASSERT_TRUE(j.append(bytes(rec)));  // ~1.1 MiB, ~280 pages
-    EXPECT_LE(thread_minor_faults() - faults, 2);
+    EXPECT_LE(thread_minor_faults() - faults, 2) << "first appends after the constructor's prefault; " << fault_environment(path);
 
     // sync() writes the records back, which write-protects their pages again, then prefaults from the tail on
     j.sync();
     faults = thread_minor_faults();
     for (int i = 0; i < 10'000; ++i) ASSERT_TRUE(j.append(bytes(rec)));
-    EXPECT_LE(thread_minor_faults() - faults, 2);
+    EXPECT_LE(thread_minor_faults() - faults, 2) << "appends after sync(); " << fault_environment(path);
     EXPECT_EQ(records().size(), 20'000u);
 }
 
