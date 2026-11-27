@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/utsname.h>
 #include <sys/vfs.h>
@@ -140,6 +142,35 @@ std::string first_line(const char* file) {
     return in || !line.empty() ? line : "?";
 }
 
+// The kernel alone, without Journal: faults taken writing one byte per page of a 1 MiB shared
+// mapping of a file next to `path`, mlock'ed and MADV_POPULATE_WRITE'd like the journal's; -1 if
+// that can't be set up. Some kernels don't keep such pages writable (OrbStack's 7.2 kernel on macOS:
+// every page faulted again), so a Journal that faults there isn't prefaulting the wrong range.
+long faults_after_populate_write(const std::string& path) {
+    const std::string probe = path + ".probe";
+    const int fd = ::open(probe.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return -1;
+    constexpr std::size_t kSize = 1u << 20;
+    long faults = -1;
+    if (::ftruncate(fd, kSize) == 0) {
+        void* addr = ::mmap(nullptr, kSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (addr != MAP_FAILED) {
+            (void)::mlock(addr, kSize);  // as Journal's .lock = true; best effort
+            if (::madvise(addr, kSize, MADV_POPULATE_WRITE) == 0) {
+                auto* bytes = static_cast<volatile uint8_t*>(addr);
+                const auto page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+                const long before = thread_minor_faults();
+                for (std::size_t off = 0; off < kSize; off += page) bytes[off] = 1;
+                faults = thread_minor_faults() - before;
+            }
+            ::munmap(addr, kSize);
+        }
+    }
+    ::close(fd);
+    ::unlink(probe.c_str());
+    return faults;
+}
+
 // What decides whether prefaulted pages stay writable, for the failure message: the faults depend on
 // the kernel and the filesystem holding the journal (TMPDIR), not on quark alone.
 std::string fault_environment(const std::string& path) {
@@ -165,6 +196,12 @@ TEST_F(TestJournal, AppendsWithinThePrefaultWindowDoNotFault) {
 #endif
     Journal j({.path = path, .capacity = 8u << 20, .lock = true, .prefault_bytes = 2u << 20});
     if (!j.prefault()) GTEST_SKIP() << "kernel without MADV_POPULATE_WRITE (Linux < 5.14)";
+    // a kernel limitation, not a Journal defect: appends on this host fault whatever Journal does
+    if (const long kernel_faults = faults_after_populate_write(path); kernel_faults > 2) {
+        GTEST_SKIP() << "this kernel doesn't keep MADV_POPULATE_WRITE'd pages writable: " << kernel_faults
+                     << " faults writing 1 MiB right after populating it, without Journal; "
+                     << fault_environment(path);
+    }
     const std::string rec(100, 'x');
     long faults = thread_minor_faults();
     for (int i = 0; i < 10'000; ++i) ASSERT_TRUE(j.append(bytes(rec)));  // ~1.1 MiB, ~280 pages
