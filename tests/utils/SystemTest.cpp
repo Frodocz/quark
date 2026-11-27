@@ -4,8 +4,11 @@
 #include <sched.h>
 #include <sys/mman.h>
 
+#include <atomic>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <thread>
 
 using namespace quark;
@@ -102,6 +105,31 @@ TEST_F(TestSystem, CrashHandlerReportsAStackOverflow) {
             (void)overflow_stack(0);
         },
         "fatal signal SEGV, backtrace:");
+}
+
+namespace {
+// RUN-08, in a child: each calling thread gets an alternate stack of its own, so two threads
+// overflowing their stacks at once don't run their handlers on the same memory
+[[noreturn]] void alt_stacks_per_thread() {
+    void* stacks[2] = {nullptr, nullptr};
+    std::atomic<int> installed{0};
+    auto run = [&installed](void*& sp) {
+        install_crash_handler();
+        stack_t ss{};
+        if (::sigaltstack(nullptr, &ss) == 0 && (ss.ss_flags & SS_DISABLE) == 0) sp = ss.ss_sp;
+        installed.fetch_add(1);
+        while (installed.load() < 2) std::this_thread::yield();  // both alive: no address reused
+    };
+    std::thread a{run, std::ref(stacks[0])};
+    std::thread b{run, std::ref(stacks[1])};
+    a.join();
+    b.join();
+    std::_Exit(stacks[0] != nullptr && stacks[1] != nullptr && stacks[0] != stacks[1] ? 0 : 1);
+}
+}  // namespace
+
+TEST_F(TestSystem, CrashHandlerGivesEachThreadItsOwnAltStack) {
+    EXPECT_EXIT(alt_stacks_per_thread(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST_F(TestSystem, ShutdownHandlerFlagsTheFirstSignalAndKillsOnTheSecond) {

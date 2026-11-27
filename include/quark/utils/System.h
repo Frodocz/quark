@@ -43,7 +43,13 @@ QUARK_API bool lock_all_memory();
 /// On SIGSEGV, SIGBUS, SIGFPE, SIGILL and SIGABRT, writes the signal and a stack trace to stderr
 /// using async-signal-safe calls only, then re-raises the signal with its default action (so a
 /// core dump is still produced). Records still queued in the async logger may be lost.
-/// The calling thread also gets an alternate signal stack, so a stack overflow there is reported too.
+/// The calling thread also gets an alternate signal stack of its own (64 KiB, unmapped when the
+/// thread exits), so a stack overflow there is reported too; call it on each thread to cover.
+///
+/// A signal has one handler: this replaces the one init_log() installs (LogBackendOptions::crash_handler,
+/// on by default), which logs the crash and flushes the log files instead, and the other way round,
+/// the last one installed wins. Use one of the two: init_log()'s in a process that logs through quark,
+/// this one in a process that doesn't. It logs a warning when it replaces another handler.
 QUARK_API void install_crash_handler();
 
 /// The first SIGINT or SIGTERM sets shutdown_requested() (check it e.g. in an event loop's step

@@ -28,6 +28,10 @@
 using namespace quark;
 namespace fs = std::filesystem;
 
+namespace quark_test {
+[[noreturn]] void throw_runtime_error(const char* what);  // FatalThrow.cpp, always built with exceptions
+}
+
 namespace {
 
 // A fresh directory per test; also run (identically) by the re-executed death-test child.
@@ -67,6 +71,10 @@ Logger* qlog() { return get_logger(kQuarkLoggerName); }
 
 void handler_prints(const char* message) noexcept { std::fprintf(stderr, "handler saw: %s\n", message); }
 void handler_reenters(const char*) noexcept { fatal_error("fatal inside the handler"); }
+void handler_slow(const char* message) noexcept {
+    std::this_thread::sleep_for(std::chrono::milliseconds{300});  // e.g. flattening positions
+    std::fprintf(stderr, "slow handler finished: %s\n", message);
+}
 
 // ---- death-test children ----
 
@@ -80,6 +88,17 @@ void handler_reenters(const char*) noexcept { fatal_error("fatal inside the hand
     fatal_error("first");
 }
 
+// RUN-02: two threads fail at about the same time (a full disk hits the journal and the log at once)
+[[noreturn]] void fatal_on_two_threads() {
+    set_fatal_handler(&handler_slow);
+    std::thread first{[] { fatal_error("first thread failed"); }};
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    std::thread second{[] { fatal_error("second thread failed", "other.cpp", 9); }};
+    first.join();
+    second.join();
+    std::_Exit(1);
+}
+
 [[noreturn]] void fatal_with_backend_thread(const fs::path& dir) {
     init_log(file_logging(dir));
     QLOG_INFO(qlog(), "before the fatal error");
@@ -88,11 +107,7 @@ void handler_reenters(const char*) noexcept { fatal_error("fatal inside the hand
 
 [[noreturn]] void uncaught_exception(const fs::path& dir) {
     init_log(file_logging(dir));
-#if defined(__cpp_exceptions)
-    std::thread{[] { throw std::runtime_error("kaboom"); }}.join();
-#else
-    std::terminate();  // what an uncaught error amounts to without exceptions
-#endif
+    std::thread{[] { quark_test::throw_runtime_error("kaboom"); }}.join();
     std::_Exit(1);
 }
 
@@ -149,12 +164,9 @@ void handler_reenters(const char*) noexcept { fatal_error("fatal inside the hand
     std::_Exit(0);
 }
 
-#if defined(QUARK_NO_EXCEPTIONS)
-// quark itself is built without exceptions: its terminate handler can't look at the exception
-constexpr const char* kTerminateMessage = "fatal error: std::terminate called";
-#else
+// RUN-03: also with QUARK_NO_EXCEPTIONS, where quark is built without exceptions but the
+// application's code still throws
 constexpr const char* kTerminateMessage = "fatal error: uncaught exception: kaboom";
-#endif
 
 }  // namespace
 
@@ -177,6 +189,14 @@ TEST(Fatal, HandlerRunsFirstAndCanBeSwapped) {
 
 TEST(Fatal, ReenteringFromTheHandlerAbortsAtOnce) {
     EXPECT_DEATH(fatal_with_reentering_handler(), "Quark fatal error: first");
+}
+
+// the second fatal error is reported too, and doesn't cut the first one's handler short
+TEST(Fatal, ConcurrentFatalErrorsAreBothReported) {
+    EXPECT_DEATH(fatal_on_two_threads(),
+                 "Quark fatal error: first thread failed.*"
+                 "Quark fatal error \\(while another thread reports one\\): second thread failed \\(other\\.cpp:9\\).*"
+                 "slow handler finished: first thread failed");
 }
 
 TEST(Fatal, MessageReachesTheLogFile) {

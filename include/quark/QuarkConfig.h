@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -35,19 +36,27 @@ public:
         return val_.has_value() && std::holds_alternative<T>(*val_);
     }
 
-    // Type extraction
+    // Type extraction. A double also reads an integer that converts exactly (|i| <= 2^53): TOML
+    // writes 5 and 5.0 as different types. Never the other way: a float doesn't read as an integer.
     template <typename T>
     [[nodiscard]] std::optional<T> get() const noexcept {
         if (is<T>()) {
             return std::get<T>(*val_);
+        }
+        if constexpr (std::is_same_v<T, double>) {
+            if (is<int64_t>()) {
+                const int64_t i = std::get<int64_t>(*val_);
+                constexpr int64_t kExact = int64_t{1} << 53;
+                if (i >= -kExact && i <= kExact) return static_cast<double>(i);
+            }
         }
         return std::nullopt;
     }
 
     template <typename T>
     [[nodiscard]] T get_or(T&& default_val) const noexcept {
-        if (is<T>()) {
-            return std::get<T>(*val_);
+        if (auto v = get<T>()) {
+            return std::move(*v);
         }
         return std::forward<T>(default_val);
     }
@@ -74,6 +83,8 @@ public:
 
 private:
     std::optional<BasicQuarkConfigValue> val_;
+
+    friend class QuarkConfig;  // names the actual type in its type-mismatch warning
 };
 
 // PImpl to separate the toml::table dependency
@@ -93,20 +104,30 @@ public:
     [[nodiscard]] static std::optional<QuarkConfig> load_file(std::string_view file_path) noexcept;
     [[nodiscard]] static std::optional<QuarkConfig> load_string(std::string_view str) noexcept;
 
-    // Dot-path lookup: cfg.get_or("A.B.C") or cfg.get("D.E"); "venues[1].name" indexes arrays (of tables)
+    // Dot-path lookup: cfg.get_or("A.B.C") or cfg.get("D.E"); "venues[1].name" indexes arrays (of tables).
+    // A double also reads an integer (see QuarkConfigValue::get).
+    //
+    // get_or: the value, or default_val when the key is missing. A key that is there with another type
+    // (cpu = "3" for an integer) also gives default_val, and says so on stderr, naming the key and both
+    // types: a typed value silently replaced by the default is a wrong parameter nobody notices.
     template <typename T>
     [[nodiscard]] T get_or(std::string_view full_path, T&& default_val) const noexcept {
         auto val = get_impl(full_path);
-        if (val && val->is<T>()) {
-            return *val->template get<T>();
+        if (val) {
+            if (auto v = val->template get<T>()) {
+                return std::move(*v);
+            }
+            warn_type_mismatch(full_path, *val, type_name<T>());
         }
         return std::forward<T>(default_val);
     }
 
+    // get: std::nullopt when the key is missing or has another type, without a warning (so a caller
+    // can try one type, then another)
     template <typename T>
     [[nodiscard]] std::optional<T> get(std::string_view path) const noexcept {
         auto val = get_impl(path);
-        if (val && val->is<T>()) {
+        if (val) {
             return val->template get<T>();
         }
         return std::nullopt;
@@ -127,6 +148,17 @@ public:
 
 private:
     [[nodiscard]] std::optional<QuarkConfigValue> get_impl(std::string_view path) const noexcept;
+
+    template <typename T>
+    static constexpr const char* type_name() noexcept {
+        if constexpr (std::is_same_v<T, bool>) return "a boolean";
+        else if constexpr (std::is_same_v<T, int64_t>) return "an integer";
+        else if constexpr (std::is_same_v<T, double>) return "a float";
+        else if constexpr (std::is_same_v<T, std::string>) return "a string";
+        else if constexpr (std::is_same_v<T, QuarkConfigArray>) return "an array";
+        else return "a table";
+    }
+    static void warn_type_mismatch(std::string_view path, const QuarkConfigValue& actual, const char* expected) noexcept;
 
     struct QuarkConfigImpl;
     std::unique_ptr<QuarkConfigImpl> impl_;

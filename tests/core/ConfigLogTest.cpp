@@ -7,12 +7,16 @@
 
 #include "QuarkTest.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <regex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace quark;
@@ -49,6 +53,38 @@ TEST(ConfigLogTest, TypedLookups) {
     EXPECT_FALSE(cfg->get<int64_t>("a.s").has_value());  // wrong type
 }
 
+// RUN-01: TOML 5 is an integer and 5.0 a float; a double reads both, as long as the integer converts exactly
+TEST(ConfigLogTest, IntegerReadsAsDouble) {
+    auto cfg = QuarkConfig::load_string("[a]\nn = 3\nbig = 9007199254740993\nxs = [1, 2.5]\n");
+    ASSERT_TRUE(cfg.has_value());
+    EXPECT_EQ(cfg->get<double>("a.n"), 3.0);
+    EXPECT_EQ(cfg->get_or<double>("a.n", 0.005), 3.0);
+    EXPECT_EQ(cfg->get<int64_t>("a.n"), 3);
+    EXPECT_FALSE(cfg->get<double>("a.big").has_value());  // 2^53 + 1: not exactly a double
+    EXPECT_EQ((*cfg)["a.xs"][0].get<double>(), 1.0);
+    EXPECT_EQ((*cfg)["a.xs"][0].get_or<double>(0.0), 1.0);
+    EXPECT_EQ((*cfg)["a.xs"][1].get<double>(), 2.5);
+    EXPECT_FALSE(cfg->get<int64_t>("a.xs[1]").has_value());  // never float -> integer
+}
+
+// RUN-01: a key that is there with another type isn't silently replaced by the default
+TEST(ConfigLogTest, GetOrWarnsOnAWrongType) {
+    auto cfg = QuarkConfig::load_string("[ts]\ncpu = \"3\"\ncancel_all = \"false\"\nfee = 0.5\n");
+    ASSERT_TRUE(cfg.has_value());
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(cfg->get_or<int64_t>("ts.cpu", -1), -1);
+    EXPECT_EQ(cfg->get_or<bool>("ts.cancel_all", true), true);
+    EXPECT_EQ(cfg->get_or<int64_t>("ts.fee", 7), 7);
+    EXPECT_EQ(cfg->get_or<int64_t>("ts.missing", 9), 9);  // missing: the default, quietly
+    EXPECT_FALSE(cfg->get<int64_t>("ts.cpu").has_value());  // get() stays quiet: callers probe types with it
+    const std::string err = testing::internal::GetCapturedStderr();
+    EXPECT_NE(err.find("config key ts.cpu is a string, expected an integer"), std::string::npos) << err;
+    EXPECT_NE(err.find("config key ts.cancel_all is a string, expected a boolean"), std::string::npos) << err;
+    EXPECT_NE(err.find("config key ts.fee is a float, expected an integer"), std::string::npos) << err;
+    EXPECT_EQ(err.find("ts.missing"), std::string::npos) << err;
+    EXPECT_EQ(std::count(err.begin(), err.end(), '\n'), 3) << err;
+}
+
 TEST(ConfigLogTest, ArraysOfTables) {
     auto cfg = QuarkConfig::load_string(R"(
 [[venue]]
@@ -80,6 +116,120 @@ TEST(ConfigLogTest, BadLevelIsAQuarkErrorNamingTheKey) {
     ASSERT_TRUE(cfg.has_value());
     QUARK_EXPECT_ERROR((void)LogConfig::load_from_config(*cfg), "log\\.net\\.level: invalid log level 'verbose'");
 }
+
+// RUN-05: quill refuses Backtrace as a logger level (QuillError at init_log), so quark doesn't accept it either
+TEST(ConfigLogTest, BacktraceIsNotALoggerLevel) {
+    auto cfg = QuarkConfig::load_string("[log.net]\nlevel = \"backtrace\"\n");
+    ASSERT_TRUE(cfg.has_value());
+    QUARK_EXPECT_ERROR((void)LogConfig::load_from_config(*cfg), "log\\.net\\.level: invalid log level 'backtrace'");
+}
+
+// RUN-07: a negative sleep would busy-poll a core, a negative flush timeout skip the flush of the fatal line
+TEST(ConfigLogTest, NegativeBackendTimesAreRefused) {
+    auto sleep = QuarkConfig::load_string("[log]\nbackend_sleep_ns = -1\n");
+    ASSERT_TRUE(sleep.has_value());
+    QUARK_EXPECT_ERROR((void)LogConfig::load_from_config(*sleep), "log\\.backend_sleep_ns must be >= 0, got -1");
+    auto timeout = QuarkConfig::load_string("[log]\nfatal_flush_timeout_ms = -5\n");
+    ASSERT_TRUE(timeout.has_value());
+    QUARK_EXPECT_ERROR((void)LogConfig::load_from_config(*timeout), "log\\.fatal_flush_timeout_ms must be >= 0, got -5");
+    auto zero = QuarkConfig::load_string("[log]\nbackend_sleep_ns = 0\nfatal_flush_timeout_ms = 0\n");
+    ASSERT_TRUE(zero.has_value());
+    const LogConfig config = LogConfig::load_from_config(*zero);
+    EXPECT_EQ(config.backend.sleep_duration, std::chrono::nanoseconds{0});
+    EXPECT_EQ(config.backend.fatal_flush_timeout, std::chrono::milliseconds{0});
+}
+
+// a negative file limit would silently mean "no rotation" / "keep every file" (0 says that explicitly)
+TEST(ConfigLogTest, NegativeFileLimitsAreRefused) {
+    auto size = QuarkConfig::load_string("[log.net]\nmax_file_size_bytes = -1\n");
+    ASSERT_TRUE(size.has_value());
+    QUARK_EXPECT_ERROR((void)LogConfig::load_from_config(*size), "log\\.net\\.max_file_size_bytes must be >= 0, got -1");
+    auto backups = QuarkConfig::load_string("[log.net]\nmax_backup_files = -3\n");
+    ASSERT_TRUE(backups.has_value());
+    QUARK_EXPECT_ERROR((void)LogConfig::load_from_config(*backups), "log\\.net\\.max_backup_files must be >= 0, got -3");
+    auto zero = QuarkConfig::load_string("[log.net]\nmax_file_size_bytes = 0\nmax_backup_files = 0\n");
+    ASSERT_TRUE(zero.has_value());
+    const LogOptions net = LogConfig::load_from_config(*zero).loggers.at("net");
+    EXPECT_EQ(net.max_file_size_bytes, 0);
+    EXPECT_EQ(net.max_backup_files, 0);
+}
+
+// RUN-01: [log] keys of the wrong type keep their default and say so
+TEST(ConfigLogTest, LogKeysOfTheWrongTypeWarn) {
+    auto cfg = QuarkConfig::load_string("[log]\ncrash_handler = \"no\"\n[log.net]\nto_console = 0\n");
+    ASSERT_TRUE(cfg.has_value());
+    testing::internal::CaptureStderr();
+    const LogConfig config = LogConfig::load_from_config(*cfg);
+    const std::string err = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(config.backend.crash_handler);
+    EXPECT_TRUE(config.loggers.at("net").to_console);
+    EXPECT_NE(err.find("config key log.crash_handler is a string, expected a boolean"), std::string::npos) << err;
+    EXPECT_NE(err.find("config key log.net.to_console is an integer, expected a boolean"), std::string::npos) << err;
+}
+
+#if !defined(QUARK_NO_EXCEPTIONS)  // the failed init_log() is fatal without exceptions: nothing to retry
+namespace {
+// RUN-06, in a child: quill hands out its manual backend worker once per process
+[[noreturn]] void manual_init_retried() {
+    LogConfig bad;
+    bad.backend.manual_backend = true;
+    LogOptions opts;
+    opts.to_console = false;
+    opts.to_rotating_file = false;
+    opts.level = quill::LogLevel::Backtrace;  // refused by quill when the logger is created
+    bad.loggers.emplace("net", opts);
+    QUARK_TRY {
+        (void)init_log(bad);
+        std::_Exit(2);  // the bad configuration was accepted
+    } QUARK_CATCH_ALL() {}
+    LogConfig good = bad;
+    good.loggers.at("net").level = quill::LogLevel::Info;
+    if (!init_log(good)) std::_Exit(3);
+    {
+        LogPoller poller;
+        QLOG_INFO(get_logger("net"), "logging works after a failed manual init_log()");
+        poller.poll_for(std::chrono::microseconds{1000});
+    }
+    std::_Exit(0);
+}
+}  // namespace
+#endif
+
+namespace {
+// RUN-04, in a child: a burst far beyond one thread's queue (BoundedDropping) is counted
+[[noreturn]] void burst_is_counted() {
+    LogConfig cfg;
+    LogOptions opts;
+    opts.to_console = false;
+    opts.to_rotating_file = false;  // the null sink: the backend still has to format every record
+    cfg.loggers.emplace("burst", opts);
+    if (!init_log(cfg)) std::_Exit(2);
+    if (dropped_log_records() != 0) std::_Exit(3);
+    Logger* burst = get_logger("burst");
+    const std::string payload(200, 'x');
+    for (int i = 0; i < 500'000; ++i) QLOG_INFO(burst, "burst {} {}", i, payload);
+    burst->flush_log();
+    // the backend reports a thread's drops when it next reads that thread's queue
+    for (int i = 0; i < 200 && dropped_log_records() == 0; ++i) {
+        QLOG_INFO(burst, "after the burst");
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    const uint64_t dropped = dropped_log_records();
+    std::fprintf(stderr, "counted %llu dropped records\n", static_cast<unsigned long long>(dropped));
+    shutdown_log();
+    std::_Exit(dropped > 0 && dropped < 500'000 ? 0 : 4);
+}
+}  // namespace
+
+TEST(ConfigLogTest, DroppedRecordsAreCounted) {
+    EXPECT_EXIT(burst_is_counted(), ::testing::ExitedWithCode(0), "Dropped [0-9]+ events.*counted [0-9]+ dropped records");
+}
+
+#if !defined(QUARK_NO_EXCEPTIONS)
+TEST(ConfigLogTest, FailedManualInitCanBeRetried) {
+    EXPECT_EXIT(manual_init_retried(), ::testing::ExitedWithCode(0), "");
+}
+#endif
 
 TEST(ConfigLogTest, FailedInitCanBeRetried) {
     const auto dir = std::filesystem::temp_directory_path() / "quark_config_log_test";

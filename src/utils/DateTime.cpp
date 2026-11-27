@@ -2,6 +2,7 @@
 #include "quark/QuarkError.h"
 #include "quark/QuarkFormat.h"
 
+#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -308,10 +309,14 @@ void TradingDay::set_from_days(int64_t days) noexcept {
 }
 
 bool TradingDay::init(int64_t now_ns) noexcept {
-    if (now_ns < 0) [[unlikely]] {
+    // floor, like get_date(): before 1970 too. The previous and next day's starts must fit in int64
+    // (days * kNsPerDay would overflow near the limits): refused, the state left unchanged.
+    constexpr int64_t kMaxDays = std::numeric_limits<int64_t>::max() / kNsPerDay - 1;
+    const int64_t days = floor_div(now_ns, kNsPerDay);
+    if (days < -kMaxDays || days > kMaxDays) [[unlikely]] {
         return false;
     }
-    set_from_days(now_ns / kNsPerDay);
+    set_from_days(days);
     return true;
 }
 

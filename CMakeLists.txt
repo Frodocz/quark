@@ -406,6 +406,7 @@ set(HEADER_FILES
 set(SOURCE_FILES
         src/QuarkConfig.cpp
         src/QuarkLog.cpp
+        src/QuarkTerminate.cpp
 
         src/crypto/Ed25519Signer.cpp
         src/crypto/HmacSha256.cpp
@@ -507,6 +508,10 @@ if (QUARK_NO_EXCEPTIONS)
     target_compile_definitions(${TARGET_NAME} PUBLIC QUARK_NO_EXCEPTIONS QUILL_NO_EXCEPTIONS)
     target_compile_options(${TARGET_NAME} PRIVATE
             $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-fno-exceptions>)
+    # the terminate handler reports exceptions thrown by the application's code, which may still
+    # use them: it alone is compiled with exceptions (it never throws a new one)
+    set_source_files_properties(src/QuarkTerminate.cpp PROPERTIES
+            COMPILE_OPTIONS $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-fexceptions>)
 endif ()
 
 if (QUARK_ENABLE_ASSERTIONS)

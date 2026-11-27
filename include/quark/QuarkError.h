@@ -28,8 +28,10 @@ using FatalHandler = void (*)(const char* message) noexcept;
 /// Returns the previous handler.
 QUARK_API FatalHandler set_fatal_handler(FatalHandler handler) noexcept;
 
-/// Reports `message` as above and aborts. `file` may be null. Re-entering it (a fatal error while
-/// reporting one) aborts at once.
+/// Reports `message` as above and aborts. `file` may be null. Re-entering it on the reporting
+/// thread (a fatal error while reporting one, e.g. in the handler) aborts at once. A fatal error on
+/// another thread meanwhile is printed to stderr (and queued to the log), then that thread waits for
+/// the reporting one to abort the process, so the handler and the flush aren't cut short.
 [[noreturn]] QUARK_API void fatal_error(const char* message, const char* file = nullptr, int line = 0) noexcept;
 
 /**

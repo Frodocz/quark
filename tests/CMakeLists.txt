@@ -38,6 +38,9 @@ endfunction()
 # core: configuration and logging
 quark_add_test(quark_test_config_log core/ConfigLogTest.cpp)
 quark_add_test(quark_test_fatal core/FatalTest.cpp)
+target_sources(quark_test_fatal PRIVATE core/FatalThrow.cpp)
+# throws like application code, also when everything else is built with -fno-exceptions
+set_source_files_properties(core/FatalThrow.cpp PROPERTIES COMPILE_OPTIONS -fexceptions)
 quark_add_test(quark_test_enum core/EnumTest.cpp)
 quark_add_test(quark_test_version core/VersionTest.cpp)
 

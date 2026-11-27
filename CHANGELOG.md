@@ -8,6 +8,24 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Changed
 
+- `QuarkConfig::get<double>` / `get_or<double>` (and `QuarkConfigValue`'s) read a TOML integer too, when it
+  converts exactly (|i| <= 2^53): `max_position = 3` used to give the default, as TOML's `3` isn't a float.
+  A float still doesn't read as an integer.
+- `QuarkConfig::get_or` prints a warning on stderr when the key is there with another type (`cpu = "3"` read
+  as an integer), naming the key and both types, then returns the default as before. `get` stays silent.
+  The `[log]` keys are read the same way.
+- `[log]`: `backend_sleep_ns` or `fatal_flush_timeout_ms` below 0 is a QuarkError naming the key (they were
+  clamped to 0: a busy-polling backend, or a fatal error that didn't wait for its log line). So is a
+  `max_file_size_bytes` or `max_backup_files` below 0 in a `[log.<name>]` table (taken as 0: no rotation,
+  every file kept). `level =
+  "backtrace"` is a QuarkError naming the key (quill refused it with a QuillError).
+- `fatal_error()` on a second thread while one is reported prints its message to stderr (and queues it to
+  the log), then waits for the first thread to abort the process; it used to abort at once, cutting the
+  first thread's handler and flush short and losing its own message.
+- With `QUARK_NO_EXCEPTIONS`, the terminate handler still logs the message of an exception escaping the
+  application's code ("uncaught exception: ..."), instead of only "std::terminate called".
+- `install_crash_handler()` gives each calling thread its own alternate signal stack (they shared one) and
+  logs a warning when it replaces another handler, such as `init_log()`'s.
 - `TradingDay::init()` and `TradingDay(int64_t)` accept instants before 1970 (floor, like `get_date()`); they
   used to refuse them, and the constructor then silently left date 0. `init()` now returns false only within
   a day of the int64 limits, where the previous/next day's start would overflow (it did, for INT64_MAX).
@@ -47,6 +65,7 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Added
 
+- `dropped_log_records()`: log records dropped by full queues (BoundedDropping), as quill reports them.
 - `RdtscClock::invariant_tsc()`: whether the CPU reports an invariant TSC (CPUID 0x80000007 EDX[8]).
 - `LatencyHistogram::negative_count()`: negative samples (stamps from two clocks, or a clock going back) are
   still recorded as 0 but counted; `LatencyRecorder::report()` warns about them.
@@ -70,6 +89,8 @@ any 1.x and `libquark.so.1` stays binary compatible across 1.x releases.
 
 ### Fixed
 
+- A failed `init_log()` with `manual_backend` can be retried: quill's manual worker was acquired again, which
+  quill allows once per process.
 - `RdtscClock::steady_ns()` froze its rate on a lasting TSC rate change of more than 1% (a sample "too far"
   from the current rate was always rejected) and then drifted from wall time without bound (2%: -11.8 s
   after 10 min). A change confirmed by consecutive samples is adopted, and the offset is always corrected.

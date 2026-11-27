@@ -74,7 +74,8 @@ struct QUARK_API LogBackendOptions {
     // the signal and flushes before the process dies (through "quark.crash", a copy of quark's
     // logger at Info, so the line shows even with [log.quark] at Warn). SIGINT and SIGTERM are
     // left to the application. With manual_backend no signal handler is installed: nothing could drive the
-    // backend from a signal. `crash_handler` in [log].
+    // backend from a signal. A signal has one handler: install_crash_handler() (System.h) replaces
+    // these, the last one installed wins. `crash_handler` in [log].
     bool crash_handler{true};
     // How long a fatal error or crash waits for the log queues to be flushed before the process
     // aborts anyway (a stuck or stopped backend must not hang it). `fatal_flush_timeout_ms` in [log].
@@ -127,6 +128,12 @@ QUARK_API bool init_log(const QuarkConfig& cfg, std::string_view section = "log"
 
 // Drains every queue and stops quill's backend thread. With `manual_backend` the LogPoller does it.
 QUARK_API void shutdown_log() noexcept;
+
+// Log records dropped because a thread's queue was full (QUARK_LOG_QUEUE_TYPE BoundedDropping, the
+// default) since the process started, as reported by the backend. quill also prints each report
+// on stderr ("Dropped N events from thread T"); the log files show nothing of them, so report this
+// count periodically (e.g. with the latency stats) to know whether records are missing.
+[[nodiscard]] QUARK_API uint64_t dropped_log_records() noexcept;
 
 // Returns the logger `name`, creating it from its config (or defaults) on first use. Never null,
 // thread-safe. Look a logger up once and keep the pointer. Libraries should prefix their names,

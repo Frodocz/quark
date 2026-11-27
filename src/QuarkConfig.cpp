@@ -1,7 +1,9 @@
 #include "quark/QuarkConfig.h"
 
 #include <cstdio>
+#include <iterator>
 #include <string>
+#include <variant>
 
 #include "toml++/toml.hpp"
 
@@ -118,6 +120,15 @@ std::vector<std::string> QuarkConfig::table_names(std::string_view path) const {
         }
     }
     return names;
+}
+
+// stderr, like the load errors above: configuration is read before (and for) init_log()
+void QuarkConfig::warn_type_mismatch(std::string_view path, const QuarkConfigValue& actual, const char* expected) noexcept {
+    static constexpr const char* kNames[] = {"a boolean", "an integer", "a float", "a string", "an array", "a table"};
+    static_assert(std::size(kNames) == std::variant_size_v<BasicQuarkConfigValue>);
+    const char* name = actual.val_ ? kNames[actual.val_->index()] : "empty";
+    std::fprintf(stderr, "quark: config key %.*s is %s, expected %s: using the default\n", static_cast<int>(path.size()),
+                 path.data(), name, expected);
 }
 
 std::optional<QuarkConfigValue> QuarkConfig::get_impl(std::string_view path) const noexcept {

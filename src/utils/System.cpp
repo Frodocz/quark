@@ -148,6 +148,38 @@ extern "C" void on_shutdown(int sig) {
     }
 }
 
+// The calling thread's alternate signal stack, unmapped when the thread exits.
+struct AltStack {
+    static constexpr std::size_t kSize = 64 * 1024;
+    void* sp{nullptr};
+
+    ~AltStack() {
+        if (sp == nullptr) return;
+        stack_t ss{};
+        ss.ss_flags = SS_DISABLE;
+        (void)::sigaltstack(&ss, nullptr);
+        ::munmap(sp, kSize);
+    }
+
+    void install() {
+        if (sp != nullptr) return;  // this thread has one already
+        void* mem = ::mmap(nullptr, kSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mem == MAP_FAILED) {
+            QUARK_LOG_WARN("install_crash_handler: no alternate signal stack, mmap failed: {}", std::strerror(errno));
+            return;
+        }
+        stack_t ss{};
+        ss.ss_sp = mem;
+        ss.ss_size = kSize;
+        if (::sigaltstack(&ss, nullptr) != 0) {
+            QUARK_LOG_WARN("sigaltstack failed: {}", std::strerror(errno));
+            ::munmap(mem, kSize);
+            return;
+        }
+        sp = mem;
+    }
+};
+
 void install(int sig, void (*handler)(int), int flags) {
     struct sigaction sa{};
     sa.sa_handler = handler;
@@ -164,16 +196,23 @@ void install_crash_handler() {
     // backtrace() loads libgcc lazily on first use, which isn't safe inside a handler: do it now
     void* frame[1];
     (void)::backtrace(frame, 1);
-    // A stack overflow leaves no stack to run the handler on: give this thread an alternate one
-    // (per thread; on other threads an overflow still dumps core, without the backtrace).
-    alignas(64) static char alt_stack[64 * 1024];
-    stack_t ss{};
-    ss.ss_sp = alt_stack;
-    ss.ss_size = sizeof(alt_stack);
-    if (::sigaltstack(&ss, nullptr) != 0) {
-        QUARK_LOG_WARN("sigaltstack failed: {}", std::strerror(errno));
-    }
+    // A stack overflow leaves no stack to run the handler on: give this thread an alternate one,
+    // its own (two threads overflowing at once must not share one). On other threads an overflow
+    // still dumps core, without the backtrace.
+    thread_local AltStack alt_stack;
+    alt_stack.install();
     for (const int sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT}) {
+        // only one handler per signal: say so when this one replaces another (e.g. init_log()'s)
+        struct sigaction old{};
+        const bool replacing = ::sigaction(sig, nullptr, &old) == 0 &&
+                               ((old.sa_flags & SA_SIGINFO) != 0 ? old.sa_sigaction != nullptr
+                                                                 : old.sa_handler != SIG_DFL && old.sa_handler != SIG_IGN &&
+                                                                       old.sa_handler != &on_crash);
+        if (replacing) {
+            QUARK_LOG_WARN("install_crash_handler: replacing the SIG{} handler already installed, e.g. by init_log() "
+                           "(crash_handler), which logs and flushes the crash",
+                           sigabbrev_np(sig) != nullptr ? sigabbrev_np(sig) : "?");
+        }
         install(sig, &on_crash, SA_RESETHAND | SA_NODEFER | SA_ONSTACK);
     }
 }

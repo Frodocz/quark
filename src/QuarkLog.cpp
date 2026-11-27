@@ -4,6 +4,8 @@
 #include "quark/QuarkError.h"
 #include "quark/utils/RdtscClock.h"
 
+#include "QuarkTerminate.h"
+
 #include "quill/Backend.h"
 #include "quill/sinks/ConsoleSink.h"
 #include "quill/sinks/NullSink.h"
@@ -65,11 +67,12 @@ std::atomic<BackendMode> g_backend_mode{BackendMode::None};
 std::atomic<pid_t> g_poller_tid{0};  // the thread bound to the manual backend
 std::atomic<int64_t> g_fatal_flush_timeout_ms{2000};
 std::atomic<FatalHandler> g_fatal_handler{nullptr};
-std::atomic<bool> g_in_fatal{false};
+std::atomic<pid_t> g_fatal_tid{0};
+std::atomic<uint64_t> g_dropped_records{0};  // dropped_log_records()  // the thread reporting a fatal error, 0 before the first
 
 pid_t current_tid() noexcept { return static_cast<pid_t>(::syscall(SYS_gettid)); }
 
-// quill::loglevel_from_string() without exceptions: same names, case-insensitive.
+// quill::loglevel_from_string() without exceptions: same names, case-insensitive, except backtrace.
 std::optional<quill::LogLevel> parse_log_level(std::string_view name) noexcept {
     struct Entry {
         std::string_view name;
@@ -83,7 +86,8 @@ std::optional<quill::LogLevel> parse_log_level(std::string_view name) noexcept {
         {"notice", quill::LogLevel::Notice},   {"warning", quill::LogLevel::Warning},
         {"warn", quill::LogLevel::Warning},    {"error", quill::LogLevel::Error},
         {"err", quill::LogLevel::Error},       {"critical", quill::LogLevel::Critical},
-        {"backtrace", quill::LogLevel::Backtrace}, {"none", quill::LogLevel::None},
+        {"none", quill::LogLevel::None},
+        // no "backtrace": quill reserves LogLevel::Backtrace and refuses it as a logger's level
     };
     for (const auto& e : kLevels) {
         if (e.name.size() != name.size()) continue;
@@ -96,18 +100,25 @@ std::optional<quill::LogLevel> parse_log_level(std::string_view name) noexcept {
     return std::nullopt;
 }
 
+// Queues the fatal message as CRITICAL; the logger it went to, or null without a backend.
+Logger* log_fatal(const char* prefix, const char* message, const char* file, int line) noexcept {
+    if (g_backend_mode.load() == BackendMode::None) return nullptr;
+    Logger* logger = Frontend::get_logger(std::string{kQuarkLoggerName});
+    if (logger == nullptr) logger = Frontend::get_valid_logger();
+    if (logger == nullptr) return nullptr;
+    if (file != nullptr) {
+        QUILL_LOG_CRITICAL(logger, "{}: {} ({}:{})", prefix, message, file, line);
+    } else {
+        QUILL_LOG_CRITICAL(logger, "{}: {}", prefix, message);
+    }
+    return logger;
+}
+
 // Logs the fatal message, then waits (bounded) for the backend to write it out.
 void flush_logs_on_fatal(const char* message, const char* file, int line) noexcept {
     const BackendMode mode = g_backend_mode.load();
-    if (mode == BackendMode::None) return;
-    Logger* logger = Frontend::get_logger(std::string{kQuarkLoggerName});
-    if (logger == nullptr) logger = Frontend::get_valid_logger();
+    Logger* logger = log_fatal("fatal error", message, file, line);
     if (logger == nullptr) return;
-    if (file != nullptr) {
-        QUILL_LOG_CRITICAL(logger, "fatal error: {} ({}:{})", message, file, line);
-    } else {
-        QUILL_LOG_CRITICAL(logger, "fatal error: {}", message);
-    }
 
     const auto timeout = std::chrono::milliseconds{g_fatal_flush_timeout_ms.load()};
     if (mode == BackendMode::Manual && current_tid() == g_poller_tid.load()) {
@@ -134,27 +145,32 @@ void flush_logs_on_fatal(const char* message, const char* file, int line) noexce
     }
 }
 
-[[noreturn]] void on_terminate() noexcept {
-#if !defined(QUARK_NO_EXCEPTIONS)
-    if (const std::exception_ptr ep = std::current_exception()) {
-        char msg[512];
-        try {
-            std::rethrow_exception(ep);
-        } catch (const std::exception& e) {
-            std::snprintf(msg, sizeof(msg), "uncaught exception: %s", e.what());
-        } catch (...) {
-            std::snprintf(msg, sizeof(msg), "uncaught exception of a non-std::exception type");
+// N of quill's drop reports, "<time> Quill INFO: Dropped N events from thread T" (bounded queues) or
+// "... and dropped N events from thread T" (unbounded ones); 0 for its other messages. The text is
+// quill's, which the version check above pins; ConfigLogTest.DroppedRecordsAreCounted guards it.
+uint64_t dropped_count(std::string_view error) noexcept {
+    for (const std::string_view marker : {std::string_view{"Quill INFO: Dropped "}, std::string_view{" and dropped "}}) {
+        const auto at = error.find(marker);
+        if (at == std::string_view::npos) continue;
+        uint64_t n = 0;
+        bool digits = false;
+        for (std::size_t i = at + marker.size(); i < error.size() && error[i] >= '0' && error[i] <= '9'; ++i) {
+            n = n * 10 + static_cast<uint64_t>(error[i] - '0');
+            digits = true;
         }
-        fatal_error(msg);
+        if (digits && error.substr(at + marker.size()).find(" events from thread ") != std::string_view::npos) return n;
     }
-#endif
-    fatal_error("std::terminate called");
+    return 0;
 }
 
 // quill backend options shared by both modes: the backend thread (or the LogPoller's thread)
 // keeps RdtscClock calibrated, a single caller as tscns requires
 void set_common_backend_options(quill::BackendOptions& options) {
     options.backend_worker_on_poll_end = [] { RdtscClock::calibrate(); };
+    options.error_notifier = [](const std::string& error) {
+        g_dropped_records.fetch_add(dropped_count(error), std::memory_order_relaxed);
+        std::fprintf(stderr, "%s\n", error.c_str());  // what quill's default notifier does
+    };
 }
 
 std::vector<std::shared_ptr<quill::Sink>> make_sinks(const std::string& name, const LogOptions& options) {
@@ -204,11 +220,19 @@ Logger* create_logger_locked(LogContext& ctx, const std::string& name) {
     return logger;
 }
 
+// out = the value at path if there is one; a value of another type keeps out and warns (QuarkConfig::get_or)
 template <typename T>
 void assign(const QuarkConfig& cfg, const std::string& path, T& out) {
-    if (auto value = cfg.get<T>(path)) {
-        out = std::move(*value);
+    out = cfg.get_or<T>(path, T{out});
+}
+
+// a negative time or file limit is a configuration error, not a 0
+int64_t non_negative(const QuarkConfig& cfg, const std::string& path, int64_t current) {
+    const int64_t v = cfg.get_or<int64_t>(path, int64_t{current});
+    if (v < 0) {
+        QUARK_THROW(QuarkError{path + " must be >= 0, got " + std::to_string(v)});
     }
+    return v;
 }
 
 std::string join_path(std::string_view section, std::string_view field) {
@@ -229,19 +253,20 @@ LogOptions LogOptions::load_from_config(const QuarkConfig& cfg, std::string_view
     LogOptions options;
     assign(cfg, key("to_console"), options.to_console);
     assign(cfg, key("to_rotating_file"), options.to_rotating_file);
-    if (auto level = cfg.get<std::string>(key("level"))) {
-        const auto parsed = parse_log_level(*level);
+    if (cfg[key("level")].has_value()) {
+        const auto level = cfg.get_or<std::string>(key("level"), std::string{});  // another type: warns, then ''
+        const auto parsed = parse_log_level(level);
         if (!parsed) {
-            QUARK_THROW(QuarkError{key("level") + ": invalid log level '" + *level +
+            QUARK_THROW(QuarkError{key("level") + ": invalid log level '" + level +
                                    "', expected one of tracel3, tracel2, tracel1, debug, info, notice, warning, error, "
-                                   "critical, backtrace, none"});
+                                   "critical, none"});
         }
         options.level = *parsed;
     }
     assign(cfg, key("pattern"), options.pattern);
     assign(cfg, key("filename"), options.filename);
-    assign(cfg, key("max_file_size_bytes"), options.max_file_size_bytes);
-    assign(cfg, key("max_backup_files"), options.max_backup_files);
+    options.max_file_size_bytes = non_negative(cfg, key("max_file_size_bytes"), options.max_file_size_bytes);
+    options.max_backup_files = non_negative(cfg, key("max_backup_files"), options.max_backup_files);
     assign(cfg, key("daily_rotation_time"), options.daily_rotation_time);
     return options;
 }
@@ -251,8 +276,8 @@ LogConfig LogConfig::load_from_config(const QuarkConfig& cfg, std::string_view s
 
     LogConfig config;
     assign(cfg, key("manual_backend"), config.backend.manual_backend);
-    if (auto cpus = cfg.get<QuarkConfigArray>(key("cpu_affinity"))) {
-        for (const auto& cpu : *cpus) {
+    if (cfg[key("cpu_affinity")].has_value()) {
+        for (const auto& cpu : cfg.get_or<QuarkConfigArray>(key("cpu_affinity"), QuarkConfigArray{})) {
             const auto id = cpu.get<int64_t>();
             if (!id || *id < 0 || *id > std::numeric_limits<uint16_t>::max()) {
                 QUARK_THROW(QuarkError{key("cpu_affinity") + " must contain cpu ids"});
@@ -260,14 +285,12 @@ LogConfig LogConfig::load_from_config(const QuarkConfig& cfg, std::string_view s
             config.backend.cpu_affinity.push_back(static_cast<uint16_t>(*id));
         }
     }
-    if (auto sleep_ns = cfg.get<int64_t>(key("backend_sleep_ns"))) {
-        config.backend.sleep_duration = std::chrono::nanoseconds{std::max<int64_t>(*sleep_ns, 0)};
-    }
+    config.backend.sleep_duration =
+        std::chrono::nanoseconds{non_negative(cfg, key("backend_sleep_ns"), config.backend.sleep_duration.count())};
     assign(cfg, key("backend_yield_when_idle"), config.backend.yield_when_idle);
     assign(cfg, key("crash_handler"), config.backend.crash_handler);
-    if (auto timeout_ms = cfg.get<int64_t>(key("fatal_flush_timeout_ms"))) {
-        config.backend.fatal_flush_timeout = std::chrono::milliseconds{std::max<int64_t>(*timeout_ms, 0)};
-    }
+    config.backend.fatal_flush_timeout = std::chrono::milliseconds{
+        non_negative(cfg, key("fatal_flush_timeout_ms"), config.backend.fatal_flush_timeout.count())};
 
     for (std::string& name : cfg.table_names(section)) {
         LogOptions options = LogOptions::load_from_config(cfg, join_path(section, name));
@@ -294,7 +317,8 @@ bool init_log(const LogConfig& config) {
             if (backend_taken) {
                 QUARK_THROW(QuarkError{"init_log(): manual_backend, but the quill backend is already running"});
             }
-            ctx.manual_worker = quill::Backend::acquire_manual_backend_worker();
+            // quill hands its manual worker out once per process: keep it across a failed init_log()
+            if (ctx.manual_worker == nullptr) ctx.manual_worker = quill::Backend::acquire_manual_backend_worker();
         } else {
             quill::BackendOptions options;
             options.thread_name = kBackendThreadName;
@@ -317,7 +341,7 @@ bool init_log(const LogConfig& config) {
         ctx.initialized = true;
         ctx.config = config;
         g_fatal_flush_timeout_ms.store(config.backend.fatal_flush_timeout.count());
-        if (config.backend.crash_handler) std::set_terminate(&on_terminate);
+        if (config.backend.crash_handler) std::set_terminate(&detail::on_terminate);
         if (!config.backend.manual_backend) g_backend_mode.store(BackendMode::Thread);  // LogPoller sets Manual
 
         QUARK_TRY {
@@ -383,6 +407,8 @@ void shutdown_log() noexcept {
     }
 }
 
+uint64_t dropped_log_records() noexcept { return g_dropped_records.load(std::memory_order_relaxed); }
+
 Logger* get_logger(std::string_view name) {
     const std::string key{name};
     if (Logger* logger = Frontend::get_logger(key)) {
@@ -437,10 +463,25 @@ void LogPoller::poll_for(std::chrono::microseconds timeout) {
 FatalHandler set_fatal_handler(FatalHandler handler) noexcept { return g_fatal_handler.exchange(handler); }
 
 void fatal_error(const char* message, const char* file, int line) noexcept {
-    if (g_in_fatal.exchange(true)) {
-        std::abort();  // a fatal error while reporting one
-    }
     if (message == nullptr) message = "(no message)";
+    const pid_t self = current_tid();
+    pid_t reporter = 0;
+    if (!g_fatal_tid.compare_exchange_strong(reporter, self)) {
+        if (reporter == self) {
+            std::abort();  // a fatal error while reporting one, e.g. from the handler
+        }
+        // Another thread is reporting one (correlated failures: a full disk hits several threads).
+        // Report this one too, then leave the handler, the flush and the abort to that thread:
+        // aborting here would cut its handler short.
+        if (file != nullptr) {
+            std::fprintf(stderr, "Quark fatal error (while another thread reports one): %s (%s:%d)\n", message, file, line);
+        } else {
+            std::fprintf(stderr, "Quark fatal error (while another thread reports one): %s\n", message);
+        }
+        std::fflush(stderr);
+        (void)log_fatal("fatal error (while another thread reports one)", message, file, line);  // best effort
+        for (;;) ::pause();  // the reporting thread aborts the process
+    }
     if (file != nullptr) {
         std::fprintf(stderr, "Quark fatal error: %s (%s:%d)\n", message, file, line);
     } else {

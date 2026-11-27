@@ -53,3 +53,44 @@ the reviewer may propose candidates but must not edit this file.
   as the production buffers (`-max_len` of 4 KiB missed this one); add a test with a buffer-filling
   flood of the repeated element.
 - Fix commit / date: NET-02 (2026-11-25)
+
+### LL-004 Typed lookups that return the default on a type mismatch
+- Module / file: `QuarkConfig.h` (`get_or`, `get`, `QuarkConfigValue::get`)
+- Symptom and trigger: `max_position = 3` read with `get_or<double>(..., 0.005)` gave 0.005. TOML writes
+  `3` as an integer and `3.0` as a float; trading's `conf/backtest_example.toml` had `queue_power = 2`
+  read as a double, right only because the default was 2.0. `cpu = "3"` read as an integer gave the
+  default (unpinned) just as silently. The tradeserver had worked around it for its risk limits.
+- Root cause: an accessor that treats "present but another type" like "missing" and returns the
+  caller's default; with no error, a wrong parameter looks like a deliberate one.
+- How to check: for every `get_or`-style accessor (config, JSON), test a present key of the wrong type
+  and an integer read as a float; grep consumers for `get_or<double>` and for keys with integer values
+  in their config files.
+- Fix commit / date: RUN-01 (2026-11-26)
+
+### LL-005 Constructors that preallocate, called per request
+- Module / file: `utils/JsonParser.h` (constructor + `warm_up()`); consumer `tradeserver/src/BinanceUsdm.cpp:81`,
+  `BitgetUta.cpp:201,223`
+- Symptom and trigger: the tradeserver built a `JsonParser` per REST response, on the loop thread that also
+  sends orders. Construction preallocates and pre-faults buffers for its capacity: 1.5 us at 1 KB, 95 us
+  at 64 KB, 1.7 ms at 1 MB, before any parsing. Per response, a new `JsonParser(1024)` cost ~1.8 us where
+  a reused one parses the same 500-byte response in ~150 ns (14x).
+- Root cause: a type whose constructor is meant to be paid once (preallocation, pre-faulting) looks like
+  any cheap local at the call site; nothing stops it being built per message.
+- How to check: grep consumers for preallocating types (JsonParser, pools, arenas, histograms, BufferPool)
+  constructed inside per-message or per-response functions; benchmark construction vs reuse
+  (`BM_JsonParserConstruct`, `BM_JsonParsePerResponse*`); document "construct once" on such types.
+- Fix commit / date: PARSE-01 (2026-11-26; quark documents it, the trading change is pending)
+
+### LL-006 An outlier filter that can lock in a stale value
+- Module / file: `utils/RdtscClock.h` (`detail::SteadyTscClock`, the rate behind `steady_ns()`)
+- Symptom and trigger: calibration rejected every rate sample more than 1% away from the current rate as
+  an outlier. After a lasting TSC rate change above 1% (or a bad first rate), every later sample was
+  "too far", so the rate froze and `steady_ns()` drifted from wall time without bound (a 2% change:
+  -11.8 s after 10 min). Found in review of a fix made earlier the same day.
+- Root cause: a filter that compares each sample only with the value it protects, and never lets
+  samples change that value: a genuine, lasting change looks like an endless stream of outliers.
+- How to check: for every "ignore samples too far from the current estimate" rule, test a lasting
+  step beyond the threshold and check the estimate follows. Accept a change confirmed by consecutive
+  agreeing samples (here 3 within 0.1%), and still test that alternating outliers are not adopted.
+  Tests: `TestSteadyTscClock.LastingRateChangeIsAdopted`, `AlternatingOutliersAreNotAdopted`.
+- Fix commit / date: TIME-04 (2026-11-26, not yet committed)
